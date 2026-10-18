@@ -292,15 +292,21 @@ def _explain(
             continue
         best = hi if pref.direction == "max" else lo
         rel = _norm(num, lo, hi, higher_is_better=pref.direction == "max")
-        label = _attr_label(p.category, pref.attribute)
+        label = _attr_label(p.category, pref.attribute).lower()
+        value = describe(p, pref.attribute)
+        best_field = spec_field(p.category, pref.attribute)
+        best_desc = format_spec_value(best_field, best) if best_field else str(best)
+        higher = pref.direction == "max"
         if num == best:
-            r.reasons.append(f"Best {label.lower()} in this shortlist ({describe(p, pref.attribute)})")
+            r.reasons.append(f"{'Best' if higher else 'Lowest'} {label} in this shortlist ({value})")
         elif rel >= 0.7:
-            r.reasons.append(f"Strong {label.lower()} ({describe(p, pref.attribute)})")
+            r.reasons.append(f"{'Strong' if higher else 'Low'} {label} ({value})")
         elif rel <= 0.3:
-            best_field = spec_field(p.category, pref.attribute)
-            best_desc = format_spec_value(best_field, best) if best_field else best
-            r.tradeoffs.append(f"Weaker {label.lower()}: {describe(p, pref.attribute)} vs up to {best_desc}")
+            r.tradeoffs.append(
+                f"Weaker {label}: {value} vs up to {best_desc}"
+                if higher
+                else f"Higher {label}: {value} vs as low as {best_desc}"
+            )
     if intent.preferred_brands and p.brand.lower() in {b.lower() for b in intent.preferred_brands}:
         r.reasons.append(f"From {p.brand}, a brand you prefer")
     r.reasons.append(f"Rated {p.rating:.1f}★ from {p.review_count:,} reviews")
