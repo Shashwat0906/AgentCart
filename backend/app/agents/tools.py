@@ -21,6 +21,7 @@ class CatalogPort(Protocol):
     def products_in_category(self, category: str) -> list[ProductSnapshot]: ...
     def products_by_ids(self, ids: list[int]) -> list[ProductSnapshot]: ...
     def find_by_name(self, text: str) -> list[ProductSnapshot]: ...
+    def named_product(self, text: str) -> ProductSnapshot | None: ...
     def all_names(self) -> list[str]: ...
 
 
@@ -36,6 +37,10 @@ class DbCatalog:
 
     def find_by_name(self, text: str) -> list[ProductSnapshot]:
         return [ProductSnapshot.of(p) for p in catalog.find_by_name(self.db, text)]
+
+    def named_product(self, text: str) -> ProductSnapshot | None:
+        p = catalog.named_product(self.db, text)
+        return ProductSnapshot.of(p) if p is not None else None
 
     def all_names(self) -> list[str]:
         from sqlalchemy import select
@@ -97,6 +102,9 @@ class ToolBox:
     def find_products_by_name(self, text: str) -> list[ProductSnapshot]:
         return self._call("find_products_by_name", {"query": text[:80]}, lambda: self.port.find_by_name(text))
 
+    def find_named_product(self, text: str) -> ProductSnapshot | None:
+        return self._call("find_named_product", {"query": text[:80]}, lambda: self.port.named_product(text))
+
     def catalog_names(self) -> list[str]:
         return self._call("catalog_names", {}, self.port.all_names)
 
@@ -114,22 +122,14 @@ class InMemoryCatalog:
         return [self.products[i] for i in ids if i in self.products]
 
     def find_by_name(self, text: str) -> list[ProductSnapshot]:
-        from app.services.catalog import _COMPARE_STOPWORDS, _tokens
+        from app.services.catalog import match_named_products
 
-        toks = set(_tokens(text)) - _COMPARE_STOPWORDS
-        scored = []
-        for p in self.products.values():
-            overlap = toks & set(_tokens(p.name))
-            if len(overlap) >= 2:
-                scored.append((-len(overlap), -len(overlap) / len(_tokens(p.name)), p.id, p, overlap))
-        scored.sort(key=lambda s: s[:3])
-        covered: set[str] = set()
-        out = []
-        for *_, p, overlap in scored:
-            if overlap - covered - {p.brand.lower()}:
-                out.append(p)
-                covered |= overlap
-        return out[:4]
+        return match_named_products(text, sorted(self.products.values(), key=lambda p: p.id))
+
+    def named_product(self, text: str) -> ProductSnapshot | None:
+        from app.services.catalog import pick_named_product
+
+        return pick_named_product(text, sorted(self.products.values(), key=lambda p: p.id))
 
     def all_names(self) -> list[str]:
         return [p.name for p in self.products.values()]

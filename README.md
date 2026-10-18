@@ -28,7 +28,7 @@ Runs fully locally with **no paid API keys**: the default AI path is a determini
 | **Cart & checkout** | Server-computed totals, strict quantity validation, row-locked stock checks (no overselling), approval-time price/stock revalidation, quote → explicit confirmation → idempotent demo order. **No real payments.** |
 | **Auth** | Argon2id password hashing, JWT bearer tokens, per-user authorization on every resource, CORS from env, rate limits, structured errors. |
 | **Frontend** | React 19 + TypeScript. Home, catalogue, product, compare, assistant (with conversation history, ranking sliders, "how I got here" trace), cart, checkout, orders and preferences. Loading, empty and error states; responsive; accessible (labels, focus states, live regions, reduced-motion support). |
-| **Quality** | 163 backend tests, 30 frontend unit tests, 7 Playwright E2E tests, and a 77-scenario evaluation suite with metrics. CI for lint, types, tests on PostgreSQL, evaluation thresholds, audits, E2E, Docker builds and secret scanning. |
+| **Quality** | 181 backend tests, 30 frontend unit tests, 7 Playwright E2E tests, and an 81-scenario evaluation suite with metrics. CI for lint, types, tests on PostgreSQL, evaluation thresholds, audits, E2E, Docker builds and secret scanning. |
 
 ## Architecture
 
@@ -47,7 +47,7 @@ flowchart LR
 ```
 backend/     FastAPI app (api, agents, providers, services, models, schemas), Alembic, tests
 frontend/    React + Vite + Tailwind SPA, Vitest unit tests, Playwright E2E
-evaluation/  77 deterministic scenarios, runner and metrics
+evaluation/  81 deterministic scenarios, runner and metrics
 docs/        architecture, API, security, deployment, implementation checklist
 infra/       index of Docker / hosting / CI files
 ```
@@ -145,16 +145,18 @@ Whatever model you use, it cannot add hard constraints, invent budgets or produc
 ## Testing & evaluation
 
 ```bash
-cd backend && .venv/bin/pytest                    # 163 tests, in-memory SQLite (~5 s)
+cd backend && .venv/bin/pytest                    # 181 tests, in-memory SQLite (~5 s)
 TEST_DATABASE_URL=postgresql+psycopg://agentcart:<pw>@localhost:5433/agentcart_test .venv/bin/pytest   # same suite on Postgres
 cd backend && .venv/bin/ruff check . && .venv/bin/ruff format --check . && .venv/bin/mypy app
-backend/.venv/bin/python evaluation/run_eval.py --strict   # 77 scenarios → evaluation/reports/latest.md
+backend/.venv/bin/python evaluation/run_eval.py --strict   # 81 scenarios → evaluation/reports/latest.md
 
 cd frontend && npm test && npm run lint && npm run typecheck && npm run build
 cd frontend && npx playwright install chromium    # once
 cd frontend && npm run e2e                        # needs the stack on :5173 (dev) …
 E2E_BASE_URL=http://localhost:8080 npm run e2e    # … or the Docker stack
 ```
+
+Sign-up and login are rate-limited to `RATE_LIMIT_AUTH_PER_MINUTE` (default 10) per client IP. Each E2E run registers several accounts, so back-to-back runs within a minute fail at sign-up with "Too many requests". Wait a minute between runs.
 
 The **evaluation suite** ([`evaluation/README.md`](evaluation/README.md)) covers:
 * budget and spec constraints, ranking, empty results, missing information, out-of-stock;
@@ -169,14 +171,14 @@ All results below were produced on the development machine (macOS, Python 3.14.4
 
 | Check | Result |
 |---|---|
-| Backend tests (SQLite) | **163 passed** |
-| Backend tests (PostgreSQL 16) | **163 passed**; line coverage **91%** |
+| Backend tests (SQLite) | **181 passed** |
+| Backend tests (PostgreSQL 16) | **181 passed**; line coverage **92%** |
 | Alembic migration upgrade → downgrade → upgrade → downgrade (PostgreSQL) | ✅ |
 | ruff lint + format, mypy (47 source files) | ✅ no issues |
-| Evaluation suite | **77/77 scenarios passed**. Constraint satisfaction 100% (92 checks); top-1 100% (12 cases); top-3 100% (5 cases); invalid-action rate 0%; tool-call success 100% (66 calls); grounded cards 100% (165) |
+| Evaluation suite | **81/81 scenarios passed**. Constraint satisfaction 100% (92 checks); top-1 100% (12 cases); top-3 100% (5 cases); invalid-action rate 0%; tool-call success 100% (81 calls); grounded cards 100% (172) |
 | Frontend unit tests (Vitest) | **30 passed** |
 | ESLint, TypeScript (`tsc -b`) | ✅ no errors or warnings |
-| Production build | ✅ JS 393 KB (121.5 KB gzip), CSS 36 KB (7.9 KB gzip) |
+| Production build | ✅ JS 393 KB (122 KB gzip), CSS 38 KB (8.1 KB gzip) |
 | Playwright E2E (desktop + mobile) against Vite dev + local API | **7 passed** |
 | Playwright E2E against the **Docker Compose** stack (nginx + CSP) | **7 passed** |
 | `docker compose up --build`: db, backend, frontend | ✅ all healthy; backend runs as non-root `app` user |

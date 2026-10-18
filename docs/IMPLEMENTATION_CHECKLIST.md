@@ -70,3 +70,6 @@ Status legend: `[ ]` todo · `[x]` done and verified
 - Session lost on page reload: API client configured after child effects ran (browser walkthrough)
 - Raw bidi / zero-width characters in source files replaced by escapes (lint review)
 - Clarifying question rendered twice; product image stretched; chat sidebar not sticky (visual review)
+- Compare-by-name picked the wrong variant ("Galaxy S24" → S24 Ultra; full names truncated by the 8-token search cap) (pre-publish black-box verification)
+- "Add <exact product name> to my cart" asked a clarifying question, and "add iPhone 15 Pro" proposed the base iPhone 15 (pre-publish black-box verification)
+- "The cheapest X" only up-weighted price, so the top pick and the cart proposal were not always the lowest-priced match (pre-publish black-box verification)

@@ -1,6 +1,6 @@
 # Evaluation suite
 
-`run_eval.py` replays **77 deterministic scenarios** (62 agent, 15 API) against the real
+`run_eval.py` replays **81 deterministic scenarios** (66 agent, 15 API) against the real
 LangGraph workflow and the real FastAPI app. It needs no network and no API key.
 
 ```bash

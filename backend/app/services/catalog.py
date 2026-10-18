@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 from sqlalchemy import ColumnElement, Select, case, func, or_, select
 from sqlalchemy.orm import Session
@@ -182,31 +183,107 @@ _COMPARE_STOPWORDS = {
 }
 
 
-def find_by_name(db: Session, text: str, limit: int = 4) -> list[Product]:
+class _Named(Protocol):
+    @property
+    def id(self) -> int: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def brand(self) -> str: ...
+
+
+# Splits "A vs B", "A and B", "A, B or C" into one segment per product mention.
+_SEGMENT_SPLIT = re.compile(r"\s*(?:\bvs\.?|\bversus\b|\bagainst\b|\band\b|\bor\b|[,;&])\s*", re.IGNORECASE)
+# Size / memory variants ("8gb", "256gb", "1tb", "45mm") distinguish SKUs less than model words ("pro", "ultra").
+_VARIANT_TOKEN = re.compile(r"^\d+(?:gb|tb|mm|w|hz)$")
+
+
+def _name_tokens(text: str) -> set[str]:
+    """Like `_tokens` but uncapped: full product names easily exceed the 8-token search cap."""
+    return {t for t in re.findall(r"[a-z0-9][a-z0-9.+-]*", text.lower()) if len(t) >= 2} - _COMPARE_STOPWORDS
+
+
+def match_named_products[N: _Named](text: str, products: Iterable[N], limit: int = 4) -> list[N]:
     """Match products mentioned by (partial) name, e.g. 'compare iPhone 15 and Galaxy S24'.
 
-    Requires ≥2 overlapping name tokens; then greedily keeps products that cover query
-    tokens not already covered, so near-duplicates (iPhone 15 vs 15 Pro) are not both picked.
+    Each segment between separators picks its single best product: most overlapping name tokens
+    (at least two), then fewest *unrequested* model words, so "Galaxy S24" means the base S24 rather
+    than the S24 Ultra, and "iPhone 15" is not the 15 Pro. Without separators, falls back to a greedy
+    pass that keeps products covering query tokens not already covered.
     """
-    toks = set(_tokens(text)) - _COMPARE_STOPWORDS
-    if not toks:
-        return []
-    scored: list[tuple[int, float, Product, set[str]]] = []
-    for p in db.scalars(select(Product)):
-        name_toks = set(_tokens(p.name))
-        overlap = toks & name_toks
-        if len(overlap) >= 2:
-            scored.append((len(overlap), len(overlap) / len(name_toks), p, overlap))
-    scored.sort(key=lambda s: (-s[0], -s[1], s[2].id))
+    candidates = [(p, _name_tokens(p.name)) for p in products]
+
+    def best(seg_toks: set[str]) -> tuple[N, set[str]] | None:
+        scored = []
+        for p, name_toks in candidates:
+            overlap = seg_toks & name_toks
+            if len(overlap) < 2:
+                continue
+            extra = name_toks - seg_toks - {p.brand.lower()}
+            model_extra = sum(1 for t in extra if not _VARIANT_TOKEN.match(t))
+            scored.append(((-len(overlap), model_extra, len(extra), p.id), p, overlap))
+        if not scored:
+            return None
+        _, p, overlap = min(scored, key=lambda s: s[0])
+        return p, overlap
+
+    out: list[N] = []
+    for segment in _SEGMENT_SPLIT.split(text):
+        hit = best(_name_tokens(segment))
+        if hit and all(hit[0].id != p.id for p in out):
+            out.append(hit[0])
+    if len(out) >= 2:
+        return out[:limit]
+
+    toks = _name_tokens(text)
+    scored = [(-len(o), -len(o) / len(n), p.id, p, o) for p, n in candidates if len(o := toks & n) >= 2]
+    scored.sort(key=lambda s: s[:3])
     covered: set[str] = set()
-    out: list[Product] = []
-    for _, _, p, overlap in scored:
+    out = []
+    for *_, p, overlap in scored:
         if overlap - covered - {p.brand.lower()}:
             out.append(p)
             covered |= overlap
         if len(out) >= limit:
             break
     return out
+
+
+def _words(text: str) -> set[str]:
+    """Tokens including single digits ("Pixel 9", "Watch 2"); single letters are dropped."""
+    return {t for t in re.findall(r"[a-z0-9][a-z0-9.+-]*", text.lower()) if len(t) >= 2 or t.isdigit()}
+
+
+def pick_named_product[N: _Named](text: str, products: Iterable[N]) -> N | None:
+    """The one product `text` names exactly, or None.
+
+    Stricter than `match_named_products`: every model word of the name (brand and size variants
+    such as "8GB" aside) must appear, plus either the brand or a model word containing a digit. So
+    "Sony WH-1000XM5", "Galaxy S24" and "iPhone 15 Pro" name products, while "the cheapest wireless
+    mouse" (vs "HP X200 Wireless Mouse") and "a watch" (vs "OnePlus Watch 2") do not. When several
+    qualify the most specific wins ("iPhone 15 Pro" over "iPhone 15"); a tie returns None.
+    """
+    words = _words(text) - _COMPARE_STOPWORDS
+    named: list[tuple[int, N]] = []
+    for p in products:
+        brand = _words(p.brand)
+        model = {t for t in _words(p.name) - brand if not _VARIANT_TOKEN.match(t)}
+        has_number = any(ch.isdigit() for t in model for ch in t)
+        if model and model <= words and (brand <= words or has_number):
+            named.append((len(model), p))
+    if not named:
+        return None
+    top = max(n for n, _ in named)
+    winners = [p for n, p in named if n == top]
+    return winners[0] if len(winners) == 1 else None
+
+
+def named_product(db: Session, text: str) -> Product | None:
+    return pick_named_product(text, db.scalars(select(Product).order_by(Product.id)))
+
+
+def find_by_name(db: Session, text: str, limit: int = 4) -> list[Product]:
+    return match_named_products(text, db.scalars(select(Product).order_by(Product.id)), limit)
 
 
 def category_summary(db: Session) -> list[dict[str, Any]]:

@@ -290,6 +290,10 @@ def compare_products(state: AgentState, deps: AgentDeps) -> dict[str, Any]:
 @node("resolve_reference")
 def resolve_reference(state: AgentState, deps: AgentDeps) -> dict[str, Any]:
     intent = state["intent"]
+    # "add Sony WH-1000XM5 to my cart": an exactly named product wins over earlier recommendations.
+    named = deps.tools.find_named_product(state["text"])
+    if named is not None:
+        return {"target": named, "response_type": "cart_proposal", "summary": "", "_detail": f"named → {named.sku}"}
     ids: list[int] = list((state.get("context") or {}).get("last_recommendation_ids") or [])
     if not ids:
         return {
@@ -343,6 +347,9 @@ def propose_actions(state: AgentState, deps: AgentDeps) -> dict[str, Any]:
     notices: list[str] = []
     summary = state.get("summary", "")
     target: ProductSnapshot | None = state.get("target")
+    if target is None and intent.wants_cart_add and state.get("response_type") == "recommendations":
+        # "add iPhone 15 Pro to my cart" parses as a brand search; propose the named model, not the top-ranked one.
+        target = deps.tools.find_named_product(state["text"])
     if (
         target is None
         and intent.wants_cart_add

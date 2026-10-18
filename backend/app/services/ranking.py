@@ -250,6 +250,9 @@ def rank_products(
         ranked.append(RankedProduct(product=p, score=round(score, 2), breakdown=breakdown))
 
     ranked.sort(key=lambda r: (-r.score, r.product.price_inr, r.product.id))
+    if "__cheapest__" in intent.keywords:
+        # "the cheapest X" means the lowest price among matches, not just a price-leaning blend.
+        ranked.sort(key=lambda r: (r.product.price_inr, -r.score, r.product.id))
     for i, r in enumerate(ranked, start=1):
         r.rank = i
         _explain(r, intent, products, ranges)

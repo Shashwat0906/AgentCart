@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from sqlalchemy.exc import OperationalError
 
 from app.agents.graph import AgentDeps, run_agent
@@ -144,6 +145,102 @@ def test_compare_by_name_and_reference() -> None:
     assert {c["name"] for c in r.comparison["columns"]} == {"Sony WH-1000XM5", "Bose QuietComfort Ultra Headphones"}
     unclear = run_agent("compare these two things", deps())
     assert unclear.response_type == "clarification"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # Base models must not be swapped for a variant (S24 Ultra, iPhone 15 Pro) the user didn't name.
+        ("compare Galaxy S24 vs iPhone 15", {"Samsung Galaxy S24 (8GB/256GB)", "Apple iPhone 15 (128GB)"}),
+        (
+            "compare Samsung Galaxy S24 and Apple iPhone 15",
+            {"Samsung Galaxy S24 (8GB/256GB)", "Apple iPhone 15 (128GB)"},
+        ),
+        # Full names exceed the 8-token search cap; trailing tokens must still count.
+        (
+            "compare Samsung Galaxy S24 (8GB/256GB) and Apple iPhone 15 (128GB)",
+            {"Samsung Galaxy S24 (8GB/256GB)", "Apple iPhone 15 (128GB)"},
+        ),
+        ("compare Galaxy S24 Ultra vs iPhone 15 Pro", {"Samsung Galaxy S24 Ultra", "Apple iPhone 15 Pro (256GB)"}),
+        (
+            "iPhone 15, Pixel 8a or OnePlus 12R",
+            {"Apple iPhone 15 (128GB)", "Google Pixel 8a", "OnePlus 12R (8GB/128GB)"},
+        ),
+    ],
+)
+def test_compare_picks_exactly_the_named_models(text: str, expected: set[str]) -> None:
+    r = run_agent(text if text.startswith("compare") else f"compare {text}", deps())
+    assert r.response_type == "comparison"
+    assert {c["name"] for c in r.comparison["columns"]} == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "name", "quantity"),
+    [
+        ("add Logitech MX Master 3S to my cart", "Logitech MX Master 3S", 1),
+        ("Add Sony WH-1000XM5 to my cart", "Sony WH-1000XM5", 1),
+        ("add 2 Galaxy S24 to my cart", "Samsung Galaxy S24 (8GB/256GB)", 2),
+        ("add Google Pixel 9 to my cart", "Google Pixel 9", 1),
+        # Parsed as a brand search: the named variant must win over the top-ranked sibling.
+        ("add iPhone 15 Pro to my cart", "Apple iPhone 15 Pro (256GB)", 1),
+        ("add Apple iPhone 15 to my cart", "Apple iPhone 15 (128GB)", 1),
+    ],
+)
+def test_add_named_product_proposes_exactly_that_product(text: str, name: str, quantity: int) -> None:
+    r = run_agent(text, deps())
+    assert [(a["kind"], a["payload"]["product_name"], a["payload"]["quantity"]) for a in r.proposed_actions] == [
+        ("add_to_cart", name, quantity)
+    ]
+    assert r.awaiting_approval
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "add a google pixel to my cart",  # Pixel 8a or Pixel 9: ambiguous
+        "add the top pick to my cart",  # nothing recommended yet
+    ],
+)
+def test_vague_add_requests_do_not_guess_a_product(text: str) -> None:
+    r = run_agent(text, deps())
+    assert r.response_type == "clarification"
+    assert r.proposed_actions == []
+
+
+def test_partial_name_overlap_does_not_hijack_a_search() -> None:
+    # "wireless mouse" overlaps "HP X200 Wireless Mouse" but does not name it; the search decides.
+    r = run_agent("add the best wireless mouse under 10000 to my cart", deps())
+    assert r.response_type == "recommendations"
+    assert r.proposed_actions[0]["payload"]["product_id"] == r.recommendations[0]["product_id"]
+
+
+def test_named_out_of_stock_product_is_not_proposed() -> None:
+    r = run_agent("add Logitech G Pro X Superlight 2 to my cart", deps())
+    assert r.proposed_actions == []
+    assert any("out of stock" in n for n in r.notices)
+
+
+@pytest.mark.parametrize(
+    ("text", "category", "spec"),
+    [
+        ("add the cheapest wireless mouse to my cart", "mice", ("wireless", True)),
+        ("cheapest 5G phone", "smartphones", ("has_5g", True)),
+        ("cheapest laptop with 16GB RAM", "laptops", ("ram_gb", 16)),
+    ],
+)
+def test_cheapest_means_lowest_price_among_matches(text: str, category: str, spec: tuple[str, Any]) -> None:
+    key, want = spec
+    matches = [
+        p
+        for p in SNAPS
+        if p.category == category
+        and p.stock > 0
+        and (p.specs.get(key) is True if want is True else (p.specs.get(key) or 0) >= want)
+    ]
+    r = run_agent(text, deps())
+    assert r.recommendations[0]["product_id"] == min(matches, key=lambda p: (p.price_inr, p.id)).id
+    prices = [c["price_inr"] for c in r.recommendations if not c["is_alternative"]]
+    assert prices == sorted(prices)
 
 
 def test_saved_preferences_are_applied_and_reported() -> None:

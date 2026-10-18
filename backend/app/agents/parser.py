@@ -781,6 +781,8 @@ class RequestParser:
             low,
         ):
             intent.sort_hint = "cheapest"
+            if re.search(r"\bcheapest\b|lowest[- ]price|least expensive", low):
+                intent.keywords.append("__cheapest__")  # superlative: order matches strictly by price
         elif re.search(r"best[- ]rated|top[- ]rated|highest[- ]rated|best reviews|most reliable|highly rated", low):
             intent.sort_hint = "best_rated"
         if re.search(r"\bcheaper\b|less expensive|lower price|lower budget", low):

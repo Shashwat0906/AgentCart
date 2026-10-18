@@ -190,7 +190,7 @@ frontend/
   src/features/chat  assistant UI (messages, recommendation & approval cards)
   src/pages       routes
   e2e/            Playwright tests
-evaluation/       77 deterministic scenarios + runner + metrics
+evaluation/       81 deterministic scenarios + runner + metrics
 infra/            notes on where the deployment files live (see infra/README.md)
 docs/             architecture, API, security, deployment, checklist
 .github/workflows CI
