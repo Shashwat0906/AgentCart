@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     rate_limit_auth_per_minute: int = 10
     rate_limit_chat_per_minute: int = 20
     rate_limit_write_per_minute: int = 60
+    # Reverse proxies in front of the app that append to X-Forwarded-For (nginx locally, Render's
+    # load balancer in production). The client IP is the entry this many places from the right;
+    # entries further left are client-supplied and ignored. 0 = use the socket peer address.
+    trusted_proxy_hops: int = Field(default=1, ge=0, le=5)
 
     # --- AI providers ---
     llm_provider: Literal["mock", "ollama", "openai_compatible", "anthropic"] = "mock"

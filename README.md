@@ -156,7 +156,7 @@ cd frontend && npm run e2e                        # needs the stack on :5173 (de
 E2E_BASE_URL=http://localhost:8080 npm run e2e    # … or the Docker stack
 ```
 
-Sign-up and login are rate-limited to `RATE_LIMIT_AUTH_PER_MINUTE` (default 10) per client IP. Each E2E run registers several accounts, so back-to-back runs within a minute fail at sign-up with "Too many requests". Wait a minute between runs.
+Sign-up and login share a limit of `RATE_LIMIT_AUTH_PER_MINUTE` (default 10) per client IP. Each E2E run registers 3 accounts from your machine, so back-to-back runs can hit it. The E2E sign-up helper then waits for the server's `Retry-After` and resubmits once, so such runs are slower but don't fail. CI's E2E job disables rate limiting.
 
 The **evaluation suite** ([`evaluation/README.md`](evaluation/README.md)) covers:
 * budget and spec constraints, ranking, empty results, missing information, out-of-stock;

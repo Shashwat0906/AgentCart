@@ -45,7 +45,25 @@ Nothing in this guide requires a credit card for the default (`LLM_PROVIDER=mock
    4. Deploy, then add the Vercel URL to Render's `CORS_ORIGINS`.
 5. **Smoke test the deployment.**
    1. Register, ask the reference laptop question, approve an add-to-cart, and place a demo order.
-   2. Optionally run Playwright against it:
+   2. **Verify the trusted-proxy setting** (`TRUSTED_PROXY_HOPS`, default 1). Render doesn't document its `X-Forwarded-For` behaviour, so this check confirms the assumption. Repeat it after any change to the hosting setup, such as a custom domain, a CDN in front, or a different provider. These attempts count against your own IP's login budget for one minute.
+      1. **Forged addresses must not bypass the limit.** From your machine, send 13 failed logins, each with a different forged `X-Forwarded-For`. `curl` opens a new connection, and therefore a new source port, for every request:
+
+         ```bash
+         for i in $(seq 1 13); do curl -s -o /dev/null -w '%{http_code} ' -H "X-Forwarded-For: 203.0.113.$i" \
+           -H 'Content-Type: application/json' -d '{"email":"nobody@example.com","password":"WrongPass123"}' \
+           https://<service>.onrender.com/api/auth/login; done; echo
+         ```
+
+         Expected: ten `401`s, then `429`. The `429` response carries a `Retry-After` header; check with `curl -si` on one more request.
+      2. **Other users must keep their own budget.** Within the same minute, send one failed login from a **different network**, for example a phone on mobile data or a hotspot. Expected: `401`, not `429`.
+      3. **Interpreting failures:**
+
+         | Result | Meaning | Action |
+         |---|---|---|
+         | Step 1 never returns `429` | The selected entry is client-controlled. Either the platform forwards the header without appending, or `TRUSTED_PROXY_HOPS` is higher than the real number of appending proxies. | **Don't go live.** Lower `TRUSTED_PROXY_HOPS` if you raised it; otherwise restrict traffic to the platform proxy. |
+         | Step 2 returns `429` | More proxies append than configured, so every user shares one budget. This is too strict, not a bypass. | Raise `TRUSTED_PROXY_HOPS` by one, redeploy, and repeat **both** steps. Never raise it past the point where step 1 still returns `429`. |
+         | Both as expected | The trusted-proxy setting is correct | None |
+   3. Optionally run Playwright against it:
 
       ```bash
       E2E_BASE_URL=https://<app>.vercel.app npx playwright test --project=desktop

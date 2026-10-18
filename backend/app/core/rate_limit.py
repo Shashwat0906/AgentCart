@@ -6,6 +6,7 @@ Good enough for a single-instance deployment. For multiple replicas, back this w
 
 from __future__ import annotations
 
+import ipaddress
 import threading
 import time
 from collections import defaultdict, deque
@@ -43,7 +44,47 @@ limiter = SlidingWindowLimiter()
 
 
 def client_ip(request: Request) -> str:
-    return request.client.host if request.client else "unknown"
+    """The address rate limits are keyed on.
+
+    Each trusted proxy appends the address it received the request from to X-Forwarded-For, so the
+    entry `trusted_proxy_hops` places from the right was written by our own proxy. Everything to its
+    left came from the client and can be forged; using the left-most entry (what uvicorn does with
+    --forwarded-allow-ips="*") would let anyone pick a fresh rate-limit bucket per request.
+    """
+    hops = get_settings().trusted_proxy_hops
+    peer = request.client.host if request.client else "unknown"
+    if hops == 0:
+        return peer
+    forwarded = [
+        part.strip()
+        for value in request.headers.getlist("x-forwarded-for")
+        for part in value.split(",")
+        if part.strip()
+    ]
+    if not forwarded:
+        return peer  # direct connection (local dev, tests)
+    # Fewer entries than proxies means a proxy was bypassed or the setting is too high; the
+    # left-most entry is then the closest thing to the client a proxy actually recorded.
+    entry = _strip_port(forwarded[-hops] if len(forwarded) >= hops else forwarded[0])
+    try:
+        return str(ipaddress.ip_address(entry))
+    except ValueError:
+        return entry[:64]  # malformed but proxy-written: still a stable key
+
+
+def _strip_port(entry: str) -> str:
+    """Drop a port some proxies append ("198.51.100.7:51234", "[2001:db8::1]:443").
+
+    That port is the client's ephemeral source port and changes on every connection; keeping it would
+    give each new connection its own rate-limit bucket. Bare IPv6 addresses (several colons) are kept.
+    """
+    if entry.startswith("["):
+        end = entry.find("]")
+        return entry[1:end] if end > 0 else entry
+    host, sep, port = entry.rpartition(":")
+    if sep and port.isdigit() and host.count(":") == 0:
+        return host
+    return entry
 
 
 def rate_limit(bucket: str, per_minute: Callable[[], int]) -> Callable[[Request], None]:

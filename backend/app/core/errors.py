@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -61,6 +62,9 @@ def install_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     async def _app_error(_: Request, exc: AppError) -> JSONResponse:
         headers = {"WWW-Authenticate": "Bearer"} if isinstance(exc, AuthError) else None
+        if isinstance(exc, RateLimited):
+            # Whole seconds, rounded up, so a client that waits exactly this long is let through.
+            headers = {"Retry-After": str(max(1, math.ceil(float(exc.details.get("retry_after_seconds", 1)))))}
         return JSONResponse(_body(exc.code, exc.message, exc.details), status_code=exc.status_code, headers=headers)
 
     @app.exception_handler(RequestValidationError)
