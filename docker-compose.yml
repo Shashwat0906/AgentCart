@@ -1,3 +1,8 @@
+# AgentCart local stack:  ./scripts/setup-env.sh && docker compose up --build
+#   frontend → http://localhost:8080   (nginx, proxies /api to the backend)
+#   backend  → http://localhost:8000   (FastAPI; docs at /api/docs)
+#   postgres → localhost:5433          (host port avoids clashing with a local Postgres)
+# Optional local LLM:  docker compose --profile ollama up --build   (then set LLM_PROVIDER=ollama)
 name: agentcart
 
 services:
@@ -5,7 +10,7 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-agentcart}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agentcart}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run ./scripts/setup-env.sh first}
       POSTGRES_DB: ${POSTGRES_DB:-agentcart}
     ports:
       - "127.0.0.1:${POSTGRES_PORT:-5433}:5432"
@@ -16,6 +21,55 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-agentcart}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-agentcart}
+      JWT_SECRET: ${JWT_SECRET:?run ./scripts/setup-env.sh first}
+      JWT_EXPIRE_MINUTES: ${JWT_EXPIRE_MINUTES:-60}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://localhost:8080}
+      RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
+      LLM_PROVIDER: ${LLM_PROVIDER:-mock}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-20}
+      LLM_MAX_RETRIES: ${LLM_MAX_RETRIES:-2}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL_DOCKER:-http://ollama:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2:3b}
+      HOSTED_LLM_BASE_URL: ${HOSTED_LLM_BASE_URL:-}
+      HOSTED_LLM_API_KEY: ${HOSTED_LLM_API_KEY:-}
+      HOSTED_LLM_MODEL: ${HOSTED_LLM_MODEL:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-haiku-5-5}
+      AUTO_SEED: "true"
+      FORWARDED_ALLOW_IPS: "*"   # only reachable via the local nginx proxy / localhost
+    ports:
+      - "127.0.0.1:8000:8000"
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      BACKEND_URL: http://backend:8000
+    ports:
+      - "127.0.0.1:8080:8080"
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:0.12.6
+    profiles: ["ollama"]
+    volumes:
+      - ollama:/root/.ollama
+    ports:
+      - "127.0.0.1:11434:11434"
 
 volumes:
   pgdata:
+  ollama:

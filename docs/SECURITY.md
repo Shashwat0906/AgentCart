@@ -1,0 +1,31 @@
+# Security model
+
+## Threats and controls
+
+| Threat | Controls | Verified by |
+|---|---|---|
+| Agent changes the cart, preferences or orders without consent | The graph can only *propose*. Actions are stored as `pending` with a 30-minute expiry and executed only by the owner's explicit `approve`. A newer proposal supersedes older pending ones. Checkout requires `confirm: true` plus a valid, unused quote. | `test_agent_proposal_requires_approval`, eval X01/X02/X15, E2E "recommend → propose → approve" |
+| Prompt injection in user messages | Messages are sanitised (NFKC, control/bidi/zero-width stripped, 2,000-char cap) and pattern-scanned; the user is told when injection is detected. Structurally, nothing in the request can set prices, skip approval or check out, because those paths don't exist in the agent. Flagged messages cannot trigger preference proposals. | `test_prompt_injection_cannot_create_unapproved_changes`, `test_injection_via_chat_changes_nothing`, eval P01–P08 |
+| Prompt injection in catalogue data | Product descriptions are never sent to an LLM and never used for ranking. Seed product `LAP-025` deliberately contains an injection. | `test_injected_description_has_no_effect_on_ranking`, eval P05/P08 |
+| LLM invents products, prices, ratings or specs | Recommendations come only from catalogue rows. LLM text passes a grounding check (₹ amounts, ratings, URLs, other product names) or is discarded. LLM-extracted constraints are always soft and validated against the spec registry. | `test_ungrounded_llm_summary_is_rejected`, `test_llm_cannot_add_hard_constraints_or_invent_budget`, eval U01–U05 |
+| Stale price or stock at approval or checkout | Approval re-reads the product under `SELECT … FOR UPDATE`: a price change creates a fresh proposal (409), insufficient stock fails (409). Checkout re-locks every row in id order and compares against the quote. Any difference returns 409 and nothing is written. | `test_price_change_*`, `test_stock_*`, eval X03/X04/X07/X08 |
+| Overselling and invalid quantities | Strict integer schemas (rejecting `2.5`, `"3"`, `true`), 1 ≤ quantity ≤ `MAX_ITEM_QUANTITY`, stock checks under lock, and DB `CHECK (stock >= 0)` / `CHECK (quantity > 0)`. | `test_invalid_quantities_rejected`, `test_cannot_oversell`, eval X05/X06/Q01–Q03 |
+| Double submission | `orders (user_id, idempotency_key)` is unique, and confirming twice returns the same order. | `test_idempotent_confirm`, eval X09 |
+| Broken access control (IDOR) | Every user-scoped query filters by the caller's id. Other users' resources return 404, not 403, so their existence isn't revealed. | `test_users_cannot_access_each_others_data`, eval X11–X13 |
+| Credential attacks | Argon2id hashing; identical errors for unknown email and wrong password; dummy-hash verification to equalise timing; per-IP rate limit on register and login. | `test_wrong_password_and_unknown_user_look_identical`, `test_login_rate_limited` |
+| Token forgery or replay | HS256 JWT with `exp`/`iat`/`nbf`/`typ`. The algorithm is pinned (the `none` algorithm is rejected). Default lifetime is 60 minutes. In production the app refuses to start without a JWT secret of at least 32 characters; in development an ephemeral random secret is generated. | `test_expired_and_forged_tokens_rejected`, eval X14 |
+| Sensitive data in memory | Preferences reject emails, phone, card and identity numbers, passwords, addresses, and health and financial details. The UI explains what is stored; every preference can be edited or deleted. | `test_sensitive_values_detected`, `test_preference_crud_and_privacy`, eval P06 |
+| XSS | React escapes all text; the app never uses `dangerouslySetInnerHTML` (`**bold**` is parsed into React elements). nginx and Vercel send a strict CSP (`script-src 'self'`), `X-Frame-Options: DENY`, `nosniff` and a referrer policy. | `MessageView` test asserts that `<script>` is rendered as text |
+| Open redirect | `?next=` must be a same-site path (`/…` and not `//…`). | `LoginPage` test |
+| Abuse / DoS | 64 KB body limit, per-user chat and write rate limits, bounded LLM retries and timeouts, an agent deadline, and pagination caps. | `test_oversized_body_rejected` |
+| Error leakage | All errors use `{error: {code, message, details}}`. Unhandled exceptions are logged server-side and return a generic 500. Validation errors never echo input. Provider errors never log response bodies. | — |
+| Secrets in git | `.env*` (except `.env.example`) is git-ignored. `scripts/setup-env.sh` generates secrets locally with mode 600. CI runs gitleaks. | CI `secrets` job |
+| Supply chain | Exact version pins (`requirements*.txt`, `package-lock.json`), `pip-audit` and `npm audit` in CI, Dependabot. Audits were clean at the time of writing. | CI `backend` / `frontend` jobs |
+
+## Known limitations
+
+* **Rate limiting is in-process.** Each replica counts separately. For multiple instances, back `core/rate_limit.py` with Redis.
+* **Tokens are stored in `localStorage`.** This avoids CSRF and makes cross-origin hosting simple, but a successful XSS could read the token. The CSP and the no-raw-HTML rule reduce that risk. Moving to an httpOnly, `SameSite=Strict` cookie plus a CSRF token is the upgrade path. There is no refresh token, so users sign in again after expiry.
+* **Injection detection is heuristic.** It informs the user; it is not the security boundary. The boundary is the absence of privileged agent capabilities.
+* **`FORWARDED_ALLOW_IPS="*"`** is used in Compose and on Render, where only a proxy can reach the backend. Do not expose the backend port directly with this setting.
+* **Accounts have no email verification, password reset or MFA.** These are out of scope for the demo.

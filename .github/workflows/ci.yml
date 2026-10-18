@@ -1,0 +1,166 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.14"
+  NODE_VERSION: "22"
+
+jobs:
+  backend:
+    name: Backend · lint, types, tests (PostgreSQL), evaluation, audit
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: agentcart
+          POSTGRES_PASSWORD: ci-only-not-a-secret
+          POSTGRES_DB: agentcart_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U agentcart -d agentcart_test"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      DATABASE_URL: postgresql+psycopg://agentcart:ci-only-not-a-secret@localhost:5432/agentcart_test
+      TEST_DATABASE_URL: postgresql+psycopg://agentcart:ci-only-not-a-secret@localhost:5432/agentcart_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements*.txt
+      - run: pip install -r requirements-dev.txt
+      - name: Ruff (lint + format)
+        run: ruff check . && ruff format --check .
+      - name: Mypy
+        run: mypy app
+      - name: Migrations upgrade/downgrade round-trip
+        run: alembic upgrade head && alembic downgrade base && alembic upgrade head && alembic downgrade base
+      - name: Pytest on PostgreSQL
+        run: pytest --cov=app --cov-report=term
+      - name: Evaluation suite (strict thresholds)
+        run: python ../evaluation/run_eval.py --strict --report-dir ../evaluation/reports
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evaluation-report
+          path: evaluation/reports/
+      - name: Dependency audit
+        run: pip-audit -r requirements.txt
+
+  frontend:
+    name: Frontend · lint, types, unit tests, build, audit
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run check:peers
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: npm audit --audit-level=high
+
+  e2e:
+    name: End-to-end (Playwright, live stack)
+    needs: [backend, frontend]
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: agentcart
+          POSTGRES_PASSWORD: ci-only-not-a-secret
+          POSTGRES_DB: agentcart
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U agentcart -d agentcart"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      DATABASE_URL: postgresql+psycopg://agentcart:ci-only-not-a-secret@localhost:5432/agentcart
+      CORS_ORIGINS: http://localhost:4173
+      RATE_LIMIT_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements*.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Start backend
+        working-directory: backend
+        run: |
+          pip install -r requirements.txt
+          alembic upgrade head
+          python -m app.seed
+          export JWT_SECRET="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+          nohup uvicorn app.main:app --port 8000 > ../backend.log 2>&1 &
+          for i in $(seq 1 30); do curl -sf localhost:8000/api/health && break; sleep 1; done
+      - name: Build and serve frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+          npm run build
+          nohup npm run preview > ../preview.log 2>&1 &
+          for i in $(seq 1 30); do curl -sf localhost:4173 > /dev/null && break; sleep 1; done
+      - name: Playwright
+        working-directory: frontend
+        env:
+          E2E_BASE_URL: http://localhost:4173
+        run: npx playwright test
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: |
+            frontend/playwright-report/
+            frontend/test-results/
+            backend.log
+
+  docker:
+    name: Docker images build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t agentcart-backend ./backend
+      - run: docker build -t agentcart-frontend ./frontend
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
