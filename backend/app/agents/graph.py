@@ -17,8 +17,8 @@ price and stock at that moment). Checkout performs a second, final revalidation.
 from __future__ import annotations
 
 import logging
-import re
 import operator
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -113,7 +113,9 @@ def node(name: str) -> Callable[[NodeFn], Callable[[AgentState, RunnableConfig],
                 logger.exception("agent node %s failed", name)
                 update = {"failed": True, "error": f"{name}: {type(exc).__name__}"}
                 detail, status = type(exc).__name__, "error"
-            update["trace"] = [{"node": name, "status": status, "ms": round((time.perf_counter() - t0) * 1000, 1), "detail": detail}]
+            update["trace"] = [
+                {"node": name, "status": status, "ms": round((time.perf_counter() - t0) * 1000, 1), "detail": detail}
+            ]
             return update
 
         wrapped.__name__ = name
@@ -169,9 +171,13 @@ def validate_constraints(state: AgentState, deps: AgentDeps) -> dict[str, Any]:
     else:
         route = "search_catalog"
     return {
-        "intent": intent, "issues": res.issues, "questions": res.questions,
-        "soft_questions": res.soft_questions, "understood": describe_intent(intent),
-        "route": route, "_detail": f"route={route}, {len(intent.constraints)} constraints, {len(res.issues)} issues",
+        "intent": intent,
+        "issues": res.issues,
+        "questions": res.questions,
+        "soft_questions": res.soft_questions,
+        "understood": describe_intent(intent),
+        "route": route,
+        "_detail": f"route={route}, {len(intent.constraints)} constraints, {len(res.issues)} issues",
     }
 
 
@@ -181,8 +187,11 @@ def clarify(state: AgentState, deps: AgentDeps) -> dict[str, Any]:
     lead = "I need one detail before I search." if len(qs) == 1 else "I need a couple of details before I search."
     if state.get("security_flags") and not state["intent"].category:
         lead = "I can help you shop, but I can't change prices, skip approvals or check out on my own."
-    return {"response_type": "clarification", "summary": f"{lead} {qs[0]['question'] if qs else ''}".strip(),
-            "_detail": f"{len(qs)} question(s)"}
+    return {
+        "response_type": "clarification",
+        "summary": f"{lead} {qs[0]['question'] if qs else ''}".strip(),
+        "_detail": f"{len(qs)} question(s)",
+    }
 
 
 @node("search_catalog")
@@ -197,12 +206,16 @@ def search_catalog(state: AgentState, deps: AgentDeps) -> dict[str, Any]:
 def rank_products_node(state: AgentState, deps: AgentDeps) -> dict[str, Any]:
     intent = state["intent"]
     candidates = state.get("candidates") or []
-    info = filter_products(candidates, intent)  # type: ignore[arg-type]
+    info = filter_products(candidates, intent)
     ranked = rank_products(info.eligible, intent, state.get("weights"), limit=TOP_K)
-    alternatives = [] if ranked else find_alternatives(candidates, intent, state.get("weights"))  # type: ignore[arg-type]
-    return {"filter_info": info, "ranked": ranked, "alternatives": alternatives,
-            "_detail": f"{len(info.eligible)} eligible / {info.considered} considered, "
-                       f"{len(info.out_of_stock_matches)} out of stock, {len(alternatives)} alternatives"}
+    alternatives = [] if ranked else find_alternatives(candidates, intent, state.get("weights"))
+    return {
+        "filter_info": info,
+        "ranked": ranked,
+        "alternatives": alternatives,
+        "_detail": f"{len(info.eligible)} eligible / {info.considered} considered, "
+        f"{len(info.out_of_stock_matches)} out of stock, {len(alternatives)} alternatives",
+    }
 
 
 @node("explain_recommendations")
@@ -228,8 +241,13 @@ def explain_recommendations(state: AgentState, deps: AgentDeps) -> dict[str, Any
     if deps.provider.is_llm and shown and not deps.past_deadline():
         names = deps.tools.catalog_names()
         summary, status = explain.polish_with_llm(deps.provider, draft, shown, names, intent, deadline=deps.deadline)
-    return {"summary": summary, "response_type": response_type, "comparison": comparison, "notices": notices,
-            "_detail": f"llm_polish={status}"}
+    return {
+        "summary": summary,
+        "response_type": response_type,
+        "comparison": comparison,
+        "notices": notices,
+        "_detail": f"llm_polish={status}",
+    }
 
 
 @node("compare_products")
@@ -238,7 +256,6 @@ def compare_products(state: AgentState, deps: AgentDeps) -> dict[str, Any]:
     ctx_ids: list[int] = list((state.get("context") or {}).get("last_recommendation_ids") or [])
     products: list[ProductSnapshot] = []
 
-
     ref = re.search(r"\b(first|top)\s+(two|2|three|3)\b|\b(them|these|those|all|both)\b", text)
     if ref and ctx_ids:
         n = 3 if (ref.group(2) in {"three", "3"} or ref.group(3) in {"them", "these", "those", "all"}) else 2
@@ -246,14 +263,28 @@ def compare_products(state: AgentState, deps: AgentDeps) -> dict[str, Any]:
     if len(products) < 2:
         products = deps.tools.find_products_by_name(state["text"])
     if len(products) < 2:
-        return {"response_type": "clarification",
-                "questions": [{"id": "compare", "question": "Which products should I compare? Name at least two (for example “Sony WH-1000XM5 vs Bose QuietComfort Ultra”) or search first and say “compare the top three”.", "options": []}],
-                "summary": "I couldn't tell which products to compare.", "_detail": "insufficient products"}
+        return {
+            "response_type": "clarification",
+            "questions": [
+                {
+                    "id": "compare",
+                    "question": "Which products should I compare? Name at least two (for example “Sony WH-1000XM5 vs Bose QuietComfort Ultra”) or search first and say “compare the top three”.",
+                    "options": [],
+                }
+            ],
+            "summary": "I couldn't tell which products to compare.",
+            "_detail": "insufficient products",
+        }
     table = comparison_table(products)
-    return {"response_type": "comparison", "comparison": table,
-            "summary": explain.comparison_summary(products, table),
-            "ranked": rank_products(products, state["intent"].model_copy(update={"category": products[0].category}), state.get("weights")),  # type: ignore[arg-type]
-            "_detail": f"{len(products)} products"}
+    return {
+        "response_type": "comparison",
+        "comparison": table,
+        "summary": explain.comparison_summary(products, table),
+        "ranked": rank_products(
+            products, state["intent"].model_copy(update={"category": products[0].category}), state.get("weights")
+        ),
+        "_detail": f"{len(products)} products",
+    }
 
 
 @node("resolve_reference")
@@ -261,19 +292,26 @@ def resolve_reference(state: AgentState, deps: AgentDeps) -> dict[str, Any]:
     intent = state["intent"]
     ids: list[int] = list((state.get("context") or {}).get("last_recommendation_ids") or [])
     if not ids:
-        return {"response_type": "clarification", "summary": "Which product would you like to add? Ask me to find something first, then say “add the top pick to my cart”.",
-                "questions": [{"id": "reference", "question": "What are you shopping for?", "options": list(CATEGORY_LABELS.values())}],
-                "_detail": "no previous recommendations"}
+        return {
+            "response_type": "clarification",
+            "summary": "Which product would you like to add? Ask me to find something first, then say “add the top pick to my cart”.",
+            "questions": [
+                {"id": "reference", "question": "What are you shopping for?", "options": list(CATEGORY_LABELS.values())}
+            ],
+            "_detail": "no previous recommendations",
+        }
     products = deps.tools.get_products(ids)
     if "__cheapest_ref__" in intent.keywords and products:
         target = min(products, key=lambda p: (p.price_inr, p.id))
     else:
         idx = intent.reference_index or 0
         if idx >= len(products):
-            return {"response_type": "clarification",
-                    "summary": f"I only showed {len(products)} option{'s' if len(products) != 1 else ''}. Which one should I add?",
-                    "questions": [{"id": "reference", "question": "Which option?", "options": [p.name for p in products]}],
-                    "_detail": f"index {idx} out of range"}
+            return {
+                "response_type": "clarification",
+                "summary": f"I only showed {len(products)} option{'s' if len(products) != 1 else ''}. Which one should I add?",
+                "questions": [{"id": "reference", "question": "Which option?", "options": [p.name for p in products]}],
+                "_detail": f"index {idx} out of range",
+            }
         target = products[idx]
     return {"target": target, "response_type": "cart_proposal", "summary": "", "_detail": f"→ {target.sku}"}
 
@@ -282,13 +320,20 @@ def resolve_reference(state: AgentState, deps: AgentDeps) -> dict[str, Any]:
 def respond_simple(state: AgentState, deps: AgentDeps) -> dict[str, Any]:
     kind = state["intent"].kind
     if kind == "reset":
-        return {"response_type": "reset", "summary": "Done — I've cleared this conversation's context. Your saved preferences are unchanged. What would you like to shop for?"}
+        return {
+            "response_type": "reset",
+            "summary": "Done — I've cleared this conversation's context. Your saved preferences are unchanged. What would you like to shop for?",
+        }
     if kind == "save_preference":
         return {"response_type": "preference_proposal", "summary": ""}
-    return {"response_type": "help", "summary": (
-        "Hi! Tell me what you need in plain words — for example “a laptop under ₹70,000 for machine learning with 16 GB RAM” "
-        "or “noise-cancelling earbuds under 10k”. I'll search the catalogue, rank options against your requirements, "
-        "explain the trade-offs and, if you like, propose cart changes for you to approve.")}
+    return {
+        "response_type": "help",
+        "summary": (
+            "Hi! Tell me what you need in plain words — for example “a laptop under ₹70,000 for machine learning with 16 GB RAM” "
+            "or “noise-cancelling earbuds under 10k”. I'll search the catalogue, rank options against your requirements, "
+            "explain the trade-offs and, if you like, propose cart changes for you to approve."
+        ),
+    }
 
 
 @node("propose_actions")
@@ -298,7 +343,12 @@ def propose_actions(state: AgentState, deps: AgentDeps) -> dict[str, Any]:
     notices: list[str] = []
     summary = state.get("summary", "")
     target: ProductSnapshot | None = state.get("target")
-    if target is None and intent.wants_cart_add and state.get("ranked") and state.get("response_type") == "recommendations":
+    if (
+        target is None
+        and intent.wants_cart_add
+        and state.get("ranked")
+        and state.get("response_type") == "recommendations"
+    ):
         ranked = state["ranked"]
         idx = intent.reference_index or 0
         target = ranked[idx].product if idx < len(ranked) else ranked[0].product  # type: ignore[assignment]
@@ -307,29 +357,49 @@ def propose_actions(state: AgentState, deps: AgentDeps) -> dict[str, Any]:
         if "__invalid_quantity__" in intent.keywords:
             notices.append("Quantity must be a whole number of at least 1, so I didn't propose a cart change.")
         elif qty > deps.max_item_quantity:
-            notices.append(f"I can't add {qty} units — the limit is {deps.max_item_quantity} per product. Ask again with a smaller quantity.")
+            notices.append(
+                f"I can't add {qty} units — the limit is {deps.max_item_quantity} per product. Ask again with a smaller quantity."
+            )
         elif target.stock <= 0:
             notices.append(f"{target.name} is out of stock, so I can't add it to your cart.")
         elif qty > target.stock:
-            notices.append(f"Only {target.stock} unit{'s' if target.stock != 1 else ''} of {target.name} {'are' if target.stock != 1 else 'is'} in stock.")
+            notices.append(
+                f"Only {target.stock} unit{'s' if target.stock != 1 else ''} of {target.name} {'are' if target.stock != 1 else 'is'} in stock."
+            )
         else:
-            actions.append({
-                "kind": "add_to_cart",
-                "payload": {"product_id": target.id, "quantity": qty, "expected_price_inr": target.price_inr, "product_name": target.name},
-                "summary": f"Add {qty} × {target.name} ({format_inr(target.price_inr)} each) to your cart",
-            })
+            actions.append(
+                {
+                    "kind": "add_to_cart",
+                    "payload": {
+                        "product_id": target.id,
+                        "quantity": qty,
+                        "expected_price_inr": target.price_inr,
+                        "product_name": target.name,
+                    },
+                    "summary": f"Add {qty} × {target.name} ({format_inr(target.price_inr)} each) to your cart",
+                }
+            )
         if state.get("response_type") == "cart_proposal":
-            summary = (f"I can add {qty} × **{target.name}** at {format_inr(target.price_inr)} each. Please approve or reject below."
-                       if actions else "I couldn't propose that cart change.")
+            summary = (
+                f"I can add {qty} × **{target.name}** at {format_inr(target.price_inr)} each. Please approve or reject below."
+                if actions
+                else "I couldn't propose that cart change."
+            )
     pref = intent.preference_to_save
     if pref is not None:
         reason = sensitive_reason(pref.value)
         if reason:
             notices.append(f"I won't save that as a preference because it looks like {reason}.")
         else:
-            label = {"preferred_brand": f"Prefer {pref.value}", "avoided_brand": f"Avoid {pref.value}",
-                     "budget_max": f"Budget for {CATEGORY_LABELS.get(pref.category or '', pref.category)}: ≤ {format_inr(int(pref.value))}" if pref.value.isdigit() else pref.value,
-                     "use_case": f"Usually shopping for {pref.value}", "note": f"Note: {pref.value}"}[pref.kind]
+            label = {
+                "preferred_brand": f"Prefer {pref.value}",
+                "avoided_brand": f"Avoid {pref.value}",
+                "budget_max": f"Budget for {CATEGORY_LABELS.get(pref.category or '', pref.category)}: ≤ {format_inr(int(pref.value))}"
+                if pref.value.isdigit()
+                else pref.value,
+                "use_case": f"Usually shopping for {pref.value}",
+                "note": f"Note: {pref.value}",
+            }[pref.kind]
             actions.append({"kind": "save_preference", "payload": pref.model_dump(), "summary": f"Remember: {label}"})
             if state.get("response_type") == "preference_proposal":
                 summary = f"Want me to remember this for future searches? “{label}”. Approve below to save it — you can edit or delete it anytime under Preferences."
@@ -342,14 +412,24 @@ def propose_actions(state: AgentState, deps: AgentDeps) -> dict[str, Any]:
 def await_approval(state: AgentState, deps: AgentDeps) -> dict[str, Any]:
     pending = bool(state.get("proposed_actions"))
     notices = ["Nothing has changed yet — approve or reject the proposed action below."] if pending else []
-    return {"awaiting_approval": pending, "notices": notices, "_detail": "waiting for user" if pending else "nothing to approve"}
+    return {
+        "awaiting_approval": pending,
+        "notices": notices,
+        "_detail": "waiting for user" if pending else "nothing to approve",
+    }
 
 
 @node("safe_failure")
 def safe_failure(state: AgentState, deps: AgentDeps) -> dict[str, Any]:
-    return {"response_type": "error", "proposed_actions": [], "awaiting_approval": False, "ranked": [], "alternatives": [],
-            "summary": "Sorry — something went wrong while I was working on that, so I stopped without changing anything. Please try again or rephrase your request.",
-            "_detail": state.get("error", "")}
+    return {
+        "response_type": "error",
+        "proposed_actions": [],
+        "awaiting_approval": False,
+        "ranked": [],
+        "alternatives": [],
+        "summary": "Sorry — something went wrong while I was working on that, so I stopped without changing anything. Please try again or rephrase your request.",
+        "_detail": state.get("error", ""),
+    }
 
 
 # =========================================================================== wiring
@@ -375,22 +455,32 @@ def _after_branch(state: AgentState) -> str:
 def build_graph() -> Any:
     g = StateGraph(AgentState)
     for name, fn in [
-        ("parse_request", parse_request), ("extract_constraints", extract_constraints),
-        ("validate_constraints", validate_constraints), ("clarify", clarify),
-        ("search_catalog", search_catalog), ("rank_products", rank_products_node),
-        ("explain_recommendations", explain_recommendations), ("compare_products", compare_products),
-        ("resolve_reference", resolve_reference), ("respond_simple", respond_simple),
-        ("propose_actions", propose_actions), ("await_approval", await_approval),
+        ("parse_request", parse_request),
+        ("extract_constraints", extract_constraints),
+        ("validate_constraints", validate_constraints),
+        ("clarify", clarify),
+        ("search_catalog", search_catalog),
+        ("rank_products", rank_products_node),
+        ("explain_recommendations", explain_recommendations),
+        ("compare_products", compare_products),
+        ("resolve_reference", resolve_reference),
+        ("respond_simple", respond_simple),
+        ("propose_actions", propose_actions),
+        ("await_approval", await_approval),
         ("safe_failure", safe_failure),
     ]:
-        g.add_node(name, fn)
+        g.add_node(name, fn)  # type: ignore[call-overload]  # LangGraph can't infer our wrapped signature
     branches = ["clarify", "search_catalog", "compare_products", "resolve_reference", "respond_simple", "safe_failure"]
     g.add_edge(START, "parse_request")
     g.add_conditional_edges("parse_request", _guard("extract_constraints"), ["extract_constraints", "safe_failure"])
-    g.add_conditional_edges("extract_constraints", _guard("validate_constraints"), ["validate_constraints", "safe_failure"])
+    g.add_conditional_edges(
+        "extract_constraints", _guard("validate_constraints"), ["validate_constraints", "safe_failure"]
+    )
     g.add_conditional_edges("validate_constraints", _after_validate, branches)
     g.add_conditional_edges("search_catalog", _guard("rank_products"), ["rank_products", "safe_failure"])
-    g.add_conditional_edges("rank_products", _guard("explain_recommendations"), ["explain_recommendations", "safe_failure"])
+    g.add_conditional_edges(
+        "rank_products", _guard("explain_recommendations"), ["explain_recommendations", "safe_failure"]
+    )
     g.add_conditional_edges("explain_recommendations", _guard("propose_actions"), ["propose_actions", "safe_failure"])
     g.add_conditional_edges("compare_products", _after_branch, ["propose_actions", "safe_failure", END])
     g.add_conditional_edges("resolve_reference", _after_branch, ["propose_actions", "safe_failure", END])
@@ -438,12 +528,21 @@ class AgentResult:
 
     def payload(self) -> dict[str, Any]:
         return {
-            "type": self.response_type, "understood": self.understood,
-            "recommendations": self.recommendations, "alternatives": self.alternatives,
-            "comparison": self.comparison, "questions": self.questions, "notices": self.notices,
-            "applied_preferences": self.applied_preferences, "security_flags": self.security_flags,
-            "trace": self.trace, "tool_calls": self.tool_calls, "provider": self.provider,
-            "llm_used": self.llm_used, "weights": self.weights, "awaiting_approval": self.awaiting_approval,
+            "type": self.response_type,
+            "understood": self.understood,
+            "recommendations": self.recommendations,
+            "alternatives": self.alternatives,
+            "comparison": self.comparison,
+            "questions": self.questions,
+            "notices": self.notices,
+            "applied_preferences": self.applied_preferences,
+            "security_flags": self.security_flags,
+            "trace": self.trace,
+            "tool_calls": self.tool_calls,
+            "provider": self.provider,
+            "llm_used": self.llm_used,
+            "weights": self.weights,
+            "awaiting_approval": self.awaiting_approval,
         }
 
 
@@ -459,8 +558,14 @@ def run_agent(
 
     deps.started = time.monotonic()
     state: AgentState = get_graph().invoke(
-        {"message": message, "context": context or {}, "saved_preferences": saved_preferences or [],
-         "weights": weights, "notices": [], "trace": []},
+        {
+            "message": message,
+            "context": context or {},
+            "saved_preferences": saved_preferences or [],
+            "weights": weights,
+            "notices": [],
+            "trace": [],
+        },
         config={"configurable": {"deps": deps}, "recursion_limit": 25},
     )
     intent = state.get("intent")

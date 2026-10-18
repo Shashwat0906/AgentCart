@@ -14,7 +14,10 @@ from typing import Any
 from app.agents.intent import Constraint, ShoppingIntent, SoftPreference
 from app.services.specs import CATEGORY_LABELS, format_inr
 
-_REFINEMENT_CUE = re.compile(r"^(and|also|with|but|what about|how about|make it|only|now|instead|ok(ay)?|actually|same but|show me (ones|those|options)|ones?\b|something)\b", re.I)
+_REFINEMENT_CUE = re.compile(
+    r"^(and|also|with|but|what about|how about|make it|only|now|instead|ok(ay)?|actually|same but|show me (ones|those|options)|ones?\b|something)\b",
+    re.I,
+)
 
 
 def merge_with_context(intent: ShoppingIntent, context: dict[str, Any], text: str) -> ShoppingIntent:
@@ -38,7 +41,8 @@ def merge_with_context(intent: ShoppingIntent, context: dict[str, Any], text: st
     new_keys = {(c.attribute, c.op) for c in intent.constraints}
     new_attrs_eq = {c.attribute for c in intent.constraints if c.op in {"eq", "in", "not_in"}}
     merged.constraints = [
-        c for c in merged.constraints
+        c
+        for c in merged.constraints
         if (c.attribute, c.op) not in new_keys and not (c.attribute in new_attrs_eq and c.op in {"eq", "in", "not_in"})
     ] + intent.constraints
     pref_attrs = {p.attribute for p in intent.preferences}
@@ -64,7 +68,8 @@ def apply_saved_preferences(intent: ShoppingIntent, prefs: list[dict[str, Any]])
     it = intent.model_copy(deep=True)
     mentioned_brands = {
         str(v).lower()
-        for c in it.constraints if c.attribute == "brand" and c.op == "in"
+        for c in it.constraints
+        if c.attribute == "brand" and c.op == "in"
         for v in (c.value if isinstance(c.value, list) else [c.value])
     }
     avoided: list[str] = []
@@ -79,24 +84,62 @@ def apply_saved_preferences(intent: ShoppingIntent, prefs: list[dict[str, Any]])
             avoided.append(value)
         elif kind == "budget_max" and it.budget_max is None and category == it.category and value.isdigit():
             it.budget_max = int(value)
-            applied.append(f"Saved budget for {CATEGORY_LABELS.get(category or '', category or '')}: ≤ {format_inr(int(value))}")
+            applied.append(
+                f"Saved budget for {CATEGORY_LABELS.get(category or '', category or '')}: ≤ {format_inr(int(value))}"
+            )
         elif kind == "use_case" and value and value not in it.use_cases:
             it.use_cases.append(value)
             applied.append(f"Usually shops for: {value}")
-            if value == "machine learning" and it.category == "laptops" and not any(c.attribute == "dedicated_gpu" for c in it.constraints):
-                it.constraints.append(Constraint(attribute="dedicated_gpu", op="eq", value=True, hard=False,
-                                                 label="Dedicated GPU (saved use case)", source="preference"))
-            if value == "travel" and it.category == "laptops" and not any(pr.attribute == "weight_kg" for pr in it.preferences):
-                it.preferences.append(SoftPreference(attribute="weight_kg", direction="min", label="Lightweight (saved use case)", source="preference"))
+            if (
+                value == "machine learning"
+                and it.category == "laptops"
+                and not any(c.attribute == "dedicated_gpu" for c in it.constraints)
+            ):
+                it.constraints.append(
+                    Constraint(
+                        attribute="dedicated_gpu",
+                        op="eq",
+                        value=True,
+                        hard=False,
+                        label="Dedicated GPU (saved use case)",
+                        source="preference",
+                    )
+                )
+            if (
+                value == "travel"
+                and it.category == "laptops"
+                and not any(pr.attribute == "weight_kg" for pr in it.preferences)
+            ):
+                it.preferences.append(
+                    SoftPreference(
+                        attribute="weight_kg",
+                        direction="min",
+                        label="Lightweight (saved use case)",
+                        source="preference",
+                    )
+                )
     if avoided:
-        it.constraints.append(Constraint(attribute="brand", op="not_in", value=avoided,
-                                         label="Not " + ", ".join(avoided), source="preference"))
+        it.constraints.append(
+            Constraint(
+                attribute="brand", op="not_in", value=avoided, label="Not " + ", ".join(avoided), source="preference"
+            )
+        )
         applied.append("Avoids " + ", ".join(avoided))
     return it, applied
 
 
 def build_context(intent: ShoppingIntent, recommendation_ids: list[int], top_price: int | None) -> dict[str, Any]:
-    stored = intent.model_copy(update={"wants_cart_add": False, "reference_index": None,
-                                       "preference_to_save": None, "keywords": [], "cart_quantity": 1})
-    return {"intent": stored.model_dump(mode="json"), "last_recommendation_ids": recommendation_ids,
-            "last_top_price": top_price}
+    stored = intent.model_copy(
+        update={
+            "wants_cart_add": False,
+            "reference_index": None,
+            "preference_to_save": None,
+            "keywords": [],
+            "cart_quantity": 1,
+        }
+    )
+    return {
+        "intent": stored.model_dump(mode="json"),
+        "last_recommendation_ids": recommendation_ids,
+        "last_top_price": top_price,
+    }

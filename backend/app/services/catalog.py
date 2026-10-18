@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from sqlalchemy import Select, case, func, or_, select
+from sqlalchemy import ColumnElement, Select, case, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.errors import NotFoundError, ValidationFailed
@@ -51,15 +51,28 @@ class ProductSnapshot:
     @classmethod
     def of(cls, p: Product) -> ProductSnapshot:
         return cls(
-            id=p.id, sku=p.sku, name=p.name, brand=p.brand, category=p.category,
-            price_inr=p.price_inr, mrp_inr=p.mrp_inr, rating=p.rating,
-            review_count=p.review_count, stock=p.stock, specs=dict(p.specs or {}),
+            id=p.id,
+            sku=p.sku,
+            name=p.name,
+            brand=p.brand,
+            category=p.category,
+            price_inr=p.price_inr,
+            mrp_inr=p.mrp_inr,
+            rating=p.rating,
+            review_count=p.review_count,
+            stock=p.stock,
+            specs=dict(p.specs or {}),
             tags=tuple(p.tags or ()),
         )
 
 
+_SEARCH_STOPWORDS = {"or", "and", "the", "for", "with", "a", "an", "of", "to", "in", "on", "my", "me", "is", "it"}
+
+
 def _tokens(q: str) -> list[str]:
-    return [t for t in re.findall(r"[a-z0-9][a-z0-9.+-]*", q.lower()) if len(t) >= 2][:8]
+    """Lower-cased alphanumeric tokens. LIKE wildcards and quotes never survive tokenisation,
+    and values are bound parameters with autoescape, so search input cannot alter the query."""
+    return [t for t in re.findall(r"[a-z0-9][a-z0-9.+-]*", q.lower()) if len(t) >= 2 and t not in _SEARCH_STOPWORDS][:8]
 
 
 def search_products(
@@ -118,12 +131,14 @@ def search_products(
     else:
         if tokens:
             terms = [case((func.lower(Product.name).contains(t, autoescape=True), 1), else_=0) for t in tokens]
-            name_hits = terms[0]
+            name_hits: ColumnElement[Any] = terms[0]
             for term in terms[1:]:
                 name_hits = name_hits + term
             stmt = stmt.order_by(name_hits.desc(), (Product.stock > 0).desc(), Product.rating.desc(), Product.id)
         else:
-            stmt = stmt.order_by((Product.stock > 0).desc(), Product.rating.desc(), Product.review_count.desc(), Product.id)
+            stmt = stmt.order_by(
+                (Product.stock > 0).desc(), Product.rating.desc(), Product.review_count.desc(), Product.id
+            )
 
     stmt = stmt.offset((page - 1) * page_size).limit(page_size)
     return list(db.scalars(stmt)), int(total)
@@ -147,8 +162,24 @@ def products_in_category(db: Session, category: str) -> list[Product]:
     return list(db.scalars(select(Product).where(Product.category == category).order_by(Product.id)))
 
 
-_COMPARE_STOPWORDS = {"compare", "vs", "versus", "and", "the", "with", "between", "which", "better",
-                      "difference", "or", "is", "of", "me", "show", "please"}
+_COMPARE_STOPWORDS = {
+    "compare",
+    "vs",
+    "versus",
+    "and",
+    "the",
+    "with",
+    "between",
+    "which",
+    "better",
+    "difference",
+    "or",
+    "is",
+    "of",
+    "me",
+    "show",
+    "please",
+}
 
 
 def find_by_name(db: Session, text: str, limit: int = 4) -> list[Product]:
@@ -180,17 +211,26 @@ def find_by_name(db: Session, text: str, limit: int = 4) -> list[Product]:
 
 def category_summary(db: Session) -> list[dict[str, Any]]:
     rows = db.execute(
-        select(Product.category, func.count(), func.min(Product.price_inr), func.max(Product.price_inr))
-        .group_by(Product.category)
+        select(Product.category, func.count(), func.min(Product.price_inr), func.max(Product.price_inr)).group_by(
+            Product.category
+        )
     ).all()
     counts = {r[0]: (int(r[1]), int(r[2]), int(r[3])) for r in rows}
     out = []
     for key, label in CATEGORY_LABELS.items():
         n, lo, hi = counts.get(key, (0, 0, 0))
-        out.append({
-            "key": key, "label": label, "product_count": n, "min_price_inr": lo, "max_price_inr": hi,
-            "specs": [{"key": f.key, "label": f.label, "type": f.type, "unit": f.unit} for f in CATEGORY_SPECS[key]],
-        })
+        out.append(
+            {
+                "key": key,
+                "label": label,
+                "product_count": n,
+                "min_price_inr": lo,
+                "max_price_inr": hi,
+                "specs": [
+                    {"key": f.key, "label": f.label, "type": f.type, "unit": f.unit} for f in CATEGORY_SPECS[key]
+                ],
+            }
+        )
     return out
 
 
@@ -241,19 +281,36 @@ def comparison_table(products: list[Any]) -> dict[str, Any]:
     for key in ("price_inr", "rating"):
         f = COMMON_FIELDS[key]
         values = [getattr(p, key) for p in products]
-        rows.append({"key": key, "label": f.label,
-                     "values": [format_spec_value(f, v) if key == "price_inr" else f"{v:.1f}★" for v in values],
-                     "best": _best_index(f, values)})
-    rows.append({"key": "stock", "label": "Availability",
-                 "values": ["In stock" if p.stock > 0 else "Out of stock" for p in products], "best": []})
+        rows.append(
+            {
+                "key": key,
+                "label": f.label,
+                "values": [format_spec_value(f, v) if key == "price_inr" else f"{v:.1f}★" for v in values],
+                "best": _best_index(f, values),
+            }
+        )
+    rows.append(
+        {
+            "key": "stock",
+            "label": "Availability",
+            "values": ["In stock" if p.stock > 0 else "Out of stock" for p in products],
+            "best": [],
+        }
+    )
     if len(categories) == 1:
         cat = next(iter(categories))
         for f in CATEGORY_SPECS.get(cat, []):
             values = [p.specs.get(f.key) for p in products]
             if all(v is None for v in values):
                 continue
-            rows.append({"key": f.key, "label": f.label,
-                         "values": [format_spec_value(f, v) for v in values], "best": _best_index(f, values)})
+            rows.append(
+                {
+                    "key": f.key,
+                    "label": f.label,
+                    "values": [format_spec_value(f, v) for v in values],
+                    "best": _best_index(f, values),
+                }
+            )
     return {
         "columns": [{"product_id": p.id, "name": p.name, "brand": p.brand, "category": p.category} for p in products],
         "rows": rows,

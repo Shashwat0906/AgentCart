@@ -61,17 +61,12 @@ def install_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     async def _app_error(_: Request, exc: AppError) -> JSONResponse:
         headers = {"WWW-Authenticate": "Bearer"} if isinstance(exc, AuthError) else None
-        return JSONResponse(
-            _body(exc.code, exc.message, exc.details), status_code=exc.status_code, headers=headers
-        )
+        return JSONResponse(_body(exc.code, exc.message, exc.details), status_code=exc.status_code, headers=headers)
 
     @app.exception_handler(RequestValidationError)
     async def _validation(_: Request, exc: RequestValidationError) -> JSONResponse:
         # Only expose location + message; never echo raw input back (it may be large or hostile).
-        errors = [
-            {"loc": [str(p) for p in e.get("loc", [])], "msg": e.get("msg", "invalid")}
-            for e in exc.errors()
-        ]
+        errors = [{"loc": [str(p) for p in e.get("loc", [])], "msg": e.get("msg", "invalid")} for e in exc.errors()]
         return JSONResponse(
             _body("validation_failed", "Request validation failed", {"errors": errors}),
             status_code=422,
@@ -85,6 +80,4 @@ def install_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(Exception)
     async def _unhandled(request: Request, exc: Exception) -> JSONResponse:
         logger.exception("Unhandled error on %s %s", request.method, request.url.path)
-        return JSONResponse(
-            _body("internal_error", "Something went wrong. Please try again."), status_code=500
-        )
+        return JSONResponse(_body("internal_error", "Something went wrong. Please try again."), status_code=500)

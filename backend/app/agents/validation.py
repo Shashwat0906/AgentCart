@@ -35,8 +35,12 @@ def _valid_constraint(c: Constraint, category: str | None, issues: list[str]) ->
                 value = float(str(value))
             except ValueError:
                 return None
-        if (f.min_value is not None and value < f.min_value * 0.5) or (f.max_value is not None and value > f.max_value * 1.5):
-            issues.append(f"Ignored '{c.label or c.attribute}' — outside any realistic range for {CATEGORY_LABELS.get(category or '', 'this category').lower()}.")
+        if (f.min_value is not None and value < f.min_value * 0.5) or (
+            f.max_value is not None and value > f.max_value * 1.5
+        ):
+            issues.append(
+                f"Ignored '{c.label or c.attribute}' — outside any realistic range for {CATEGORY_LABELS.get(category or '', 'this category').lower()}."
+            )
             return None
     elif f.type == "bool":
         if not isinstance(value, bool):
@@ -59,11 +63,13 @@ def validate_intent(intent: ShoppingIntent, *, max_item_quantity: int) -> Valida
     if it.budget_min is not None and not (0 <= it.budget_min <= MAX_BUDGET):
         it.budget_min = None
     if it.budget_min and it.budget_max and it.budget_min > it.budget_max:
-        res.questions.append({
-            "id": "budget_conflict",
-            "question": f"Your minimum ({format_inr(it.budget_min)}) is higher than your maximum ({format_inr(it.budget_max)}). What budget should I use?",
-            "options": [f"Up to {format_inr(it.budget_max)}", f"Up to {format_inr(it.budget_min)}"],
-        })
+        res.questions.append(
+            {
+                "id": "budget_conflict",
+                "question": f"Your minimum ({format_inr(it.budget_min)}) is higher than your maximum ({format_inr(it.budget_max)}). What budget should I use?",
+                "options": [f"Up to {format_inr(it.budget_max)}", f"Up to {format_inr(it.budget_min)}"],
+            }
+        )
 
     cleaned: list[Constraint] = []
     for c in it.constraints[:MAX_CONSTRAINTS]:
@@ -76,29 +82,43 @@ def validate_intent(intent: ShoppingIntent, *, max_item_quantity: int) -> Valida
     it.preferences = [p for p in it.preferences if spec_field(it.category, p.attribute) is not None]
 
     # Contradictory numeric bounds, e.g. RAM ≥ 32 and RAM ≤ 16.
-    lows = {c.attribute: float(c.value) for c in cleaned if c.hard and c.op == "gte" and isinstance(c.value, int | float)}
+    lows = {
+        c.attribute: float(c.value) for c in cleaned if c.hard and c.op == "gte" and isinstance(c.value, int | float)
+    }
     for c in cleaned:
-        if c.hard and c.op == "lte" and isinstance(c.value, int | float) and c.attribute in lows and lows[c.attribute] > c.value:
+        if (
+            c.hard
+            and c.op == "lte"
+            and isinstance(c.value, int | float)
+            and c.attribute in lows
+            and lows[c.attribute] > c.value
+        ):
             label = spec_field(it.category, c.attribute)
-            res.questions.append({
-                "id": f"conflict_{c.attribute}",
-                "question": f"Your {label.label.lower() if label else c.attribute} requirements contradict each other. Which limit matters more?",
-                "options": [],
-            })
+            res.questions.append(
+                {
+                    "id": f"conflict_{c.attribute}",
+                    "question": f"Your {label.label.lower() if label else c.attribute} requirements contradict each other. Which limit matters more?",
+                    "options": [],
+                }
+            )
 
     if it.cart_quantity > max_item_quantity:
         res.issues.append(f"You can add at most {max_item_quantity} units of one product.")
 
     if it.kind == "search" and it.category is None:
-        res.questions.append({
-            "id": "category",
-            "question": "What kind of product are you shopping for?",
-            "options": list(CATEGORY_LABELS.values()),
-        })
+        res.questions.append(
+            {
+                "id": "category",
+                "question": "What kind of product are you shopping for?",
+                "options": list(CATEGORY_LABELS.values()),
+            }
+        )
     elif it.kind == "search" and it.budget_max is None and it.budget_min is None:
-        res.soft_questions.append({
-            "id": "budget",
-            "question": "Do you have a budget in mind? I can narrow these down further.",
-            "options": [],
-        })
+        res.soft_questions.append(
+            {
+                "id": "budget",
+                "question": "Do you have a budget in mind? I can narrow these down further.",
+                "options": [],
+            }
+        )
     return res

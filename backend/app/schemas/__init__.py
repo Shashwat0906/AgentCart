@@ -50,7 +50,7 @@ class UserOut(Model):
 
 class TokenOut(Model):
     access_token: str
-    token_type: Literal["bearer"] = "bearer"
+    token_type: Literal["bearer"] = "bearer"  # noqa: S105 - token type, not a secret
     expires_in: int
     user: UserOut
 

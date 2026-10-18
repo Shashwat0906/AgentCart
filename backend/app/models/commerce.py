@@ -60,9 +60,7 @@ class CheckoutQuote(Base):
 
 class Order(Base):
     __tablename__ = "orders"
-    __table_args__ = (
-        UniqueConstraint("user_id", "idempotency_key", name="uq_orders_user_idempotency"),
-    )
+    __table_args__ = (UniqueConstraint("user_id", "idempotency_key", name="uq_orders_user_idempotency"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
@@ -85,9 +83,7 @@ class OrderItem(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     order_id: Mapped[int] = mapped_column(ForeignKey("orders.id", ondelete="CASCADE"), index=True)
-    product_id: Mapped[int | None] = mapped_column(
-        ForeignKey("products.id", ondelete="SET NULL"), nullable=True
-    )
+    product_id: Mapped[int | None] = mapped_column(ForeignKey("products.id", ondelete="SET NULL"), nullable=True)
     sku: Mapped[str] = mapped_column(String(32))
     name: Mapped[str] = mapped_column(String(160))
     unit_price_inr: Mapped[int] = mapped_column(Integer)

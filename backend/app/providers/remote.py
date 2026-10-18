@@ -8,8 +8,8 @@ from app.providers.base import LLMProvider, ProviderError
 class OllamaProvider(LLMProvider):
     name = "ollama"
 
-    def __init__(self, base_url: str, model: str, **kw: float | int) -> None:
-        super().__init__(**kw)  # type: ignore[arg-type]
+    def __init__(self, base_url: str, model: str, *, timeout: float = 20.0, max_retries: int = 2) -> None:
+        super().__init__(timeout=timeout, max_retries=max_retries)
         self.base_url = base_url.rstrip("/")
         self.model = model
 
@@ -34,8 +34,8 @@ class OpenAICompatibleProvider(LLMProvider):
 
     name = "openai_compatible"
 
-    def __init__(self, base_url: str, api_key: str, model: str, **kw: float | int) -> None:
-        super().__init__(**kw)  # type: ignore[arg-type]
+    def __init__(self, base_url: str, api_key: str, model: str, *, timeout: float = 20.0, max_retries: int = 2) -> None:
+        super().__init__(timeout=timeout, max_retries=max_retries)
         if not api_key:
             raise ProviderError("HOSTED_LLM_API_KEY is not set")
         self.base_url = base_url.rstrip("/")
@@ -66,8 +66,8 @@ class OpenAICompatibleProvider(LLMProvider):
 class AnthropicProvider(LLMProvider):
     name = "anthropic"
 
-    def __init__(self, api_key: str, model: str, **kw: float | int) -> None:
-        super().__init__(**kw)  # type: ignore[arg-type]
+    def __init__(self, api_key: str, model: str, *, timeout: float = 20.0, max_retries: int = 2) -> None:
+        super().__init__(timeout=timeout, max_retries=max_retries)
         if not api_key:
             raise ProviderError("ANTHROPIC_API_KEY is not set")
         self.api_key = api_key

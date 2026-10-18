@@ -32,9 +32,7 @@ class Message(Base):
     __tablename__ = "messages"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    conversation_id: Mapped[str] = mapped_column(
-        ForeignKey("conversations.id", ondelete="CASCADE"), index=True
-    )
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"), index=True)
     role: Mapped[str] = mapped_column(String(16))  # "user" | "assistant"
     content: Mapped[str] = mapped_column(Text)
     # Structured agent output: recommendations, comparison, questions, trace …
@@ -67,9 +65,7 @@ class AgentAction(Base):
 
 class Preference(Base):
     __tablename__ = "preferences"
-    __table_args__ = (
-        UniqueConstraint("user_id", "kind", "category", "value", name="uq_preferences_entry"),
-    )
+    __table_args__ = (UniqueConstraint("user_id", "kind", "category", "value", name="uq_preferences_entry"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)

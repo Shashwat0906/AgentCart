@@ -23,7 +23,10 @@ _SENSITIVE = [
     ("an Aadhaar/PAN-like identifier", re.compile(r"\b\d{4}\s?\d{4}\s?\d{4}\b|\b[A-Z]{5}\d{4}[A-Z]\b", re.I)),
     ("a password or secret", re.compile(r"\b(password|passcode|pin|otp|cvv|secret|api[_ ]?key)\b", re.I)),
     ("a street address", re.compile(r"\b(flat|house|plot|street|road|lane|sector|pincode|pin code)\b.{0,30}\d", re.I)),
-    ("health or financial details", re.compile(r"\b(diagnos\w*|disease|medical|salary|income|loan|debt|religion|caste)\b", re.I)),
+    (
+        "health or financial details",
+        re.compile(r"\b(diagnos\w*|disease|medical|salary|income|loan|debt|religion|caste)\b", re.I),
+    ),
 ]
 
 
@@ -65,7 +68,9 @@ def as_dicts(prefs: list[Preference]) -> list[dict[str, Any]]:
     return [{"kind": p.kind, "value": p.value, "category": p.category} for p in prefs]
 
 
-def create_preference(db: Session, user_id: int, kind: str, value: str, category: str | None, source: str = "user") -> Preference:
+def create_preference(
+    db: Session, user_id: int, kind: str, value: str, category: str | None, source: str = "user"
+) -> Preference:
     kind, value, category = normalise(kind, value, category)
     if len(list_preferences(db, user_id)) >= MAX_PREFERENCES:
         raise ValidationFailed(f"You can save at most {MAX_PREFERENCES} preferences")
@@ -82,6 +87,11 @@ def create_preference(db: Session, user_id: int, kind: str, value: str, category
                 p.source = source
                 db.commit()
                 return p
+    # Checked in code as well as by the unique constraint: SQL treats NULL categories as
+    # distinct, so the constraint alone would allow duplicate category-less preferences.
+    for p in list_preferences(db, user_id):
+        if p.kind == kind and p.category == category and p.value.lower() == value.lower():
+            raise ConflictError("That preference is already saved")
     pref = Preference(user_id=user_id, kind=kind, value=value, category=category, source=source)
     db.add(pref)
     try:
@@ -101,8 +111,12 @@ def _owned(db: Session, user_id: int, pref_id: int) -> Preference:
 
 def update_preference(db: Session, user_id: int, pref_id: int, value: str | None, category: str | None) -> Preference:
     pref = _owned(db, user_id, pref_id)
-    _, new_value, new_cat = normalise(pref.kind, value if value is not None else pref.value,
-                                      category if category is not None else pref.category)
+    _, new_value, new_cat = normalise(
+        pref.kind, value if value is not None else pref.value, category if category is not None else pref.category
+    )
+    for p in list_preferences(db, user_id):
+        if p.id != pref.id and p.kind == pref.kind and p.category == new_cat and p.value.lower() == new_value.lower():
+            raise ConflictError("That preference is already saved")
     pref.value, pref.category = new_value, new_cat
     try:
         db.commit()

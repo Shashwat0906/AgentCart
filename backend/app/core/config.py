@@ -72,9 +72,7 @@ class Settings(BaseSettings):
     def _secure_defaults(self) -> Settings:
         if self.jwt_secret.strip().lower() in _INSECURE_SECRETS or len(self.jwt_secret) < 32:
             if self.environment == "production":
-                raise ValueError(
-                    "JWT_SECRET must be set to a random value of at least 32 characters in production"
-                )
+                raise ValueError("JWT_SECRET must be set to a random value of at least 32 characters in production")
             # Development/test: generate an ephemeral secret instead of shipping a known default.
             # Tokens are invalidated whenever the process restarts.
             self.jwt_secret = secrets.token_urlsafe(48)

@@ -15,17 +15,46 @@ from dataclasses import dataclass
 MAX_MESSAGE_CHARS = 2000
 
 _INJECTION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-    ("override_instructions", re.compile(r"\b(ignore|disregard|forget|override)\b.{0,40}\b(instructions?|rules?|prompts?|guidelines?|polic(y|ies))\b", re.I)),
+    (
+        "override_instructions",
+        re.compile(
+            r"\b(ignore|disregard|forget|override)\b.{0,40}\b(instructions?|rules?|prompts?|guidelines?|polic(y|ies))\b",
+            re.I,
+        ),
+    ),
     ("role_hijack", re.compile(r"\b(you are now|act as|pretend to be|developer mode|jailbreak|dan mode)\b", re.I)),
-    ("system_prompt", re.compile(r"\b(system prompt|system message|hidden prompt|reveal (your|the) (prompt|instructions))\b", re.I)),
-    ("price_manipulation", re.compile(r"\b(set|change|make|update|override)\b.{0,30}\bprice\b|\bprice\b.{0,20}\b(to|=)\s*(₹|rs\.?|inr)?\s*0\b|\b100\s*%\s*(discount|off)\b|\b(free of cost|for free)\b", re.I)),
-    ("approval_bypass", re.compile(r"\b(without|skip|bypass|no need (for|to))\b.{0,30}\b(approv\w*|confirm\w*|asking|permission|consent)\b", re.I)),
-    ("auto_checkout", re.compile(r"\b(checkout|place (the |an )?order|pay)\b.{0,20}\b(now|immediately|automatically|for me)\b", re.I)),
+    (
+        "system_prompt",
+        re.compile(r"\b(system prompt|system message|hidden prompt|reveal (your|the) (prompt|instructions))\b", re.I),
+    ),
+    (
+        "price_manipulation",
+        re.compile(
+            r"\b(set|change|make|update|override)\b.{0,30}\bprice\b|\bprice\b.{0,20}\b(to|=)\s*(₹|rs\.?|inr)?\s*0\b|\b100\s*%\s*(discount|off)\b|\b(free of cost|for free)\b",
+            re.I,
+        ),
+    ),
+    (
+        "approval_bypass",
+        re.compile(
+            r"\b(without|skip|bypass|no need (for|to))\b.{0,30}\b(approv\w*|confirm\w*|asking|permission|consent)\b",
+            re.I,
+        ),
+    ),
+    (
+        "auto_checkout",
+        re.compile(r"\b(checkout|place (the |an )?order|pay)\b.{0,20}\b(now|immediately|automatically|for me)\b", re.I),
+    ),
     ("privilege", re.compile(r"\b(admin|root|sudo|superuser)\b.{0,20}\b(mode|access|privileges?|rights)\b", re.I)),
-    ("other_user", re.compile(r"\b(another|other|different) (user|account|customer)'?s?\b.{0,30}\b(cart|order|data|preferences?)\b", re.I)),
+    (
+        "other_user",
+        re.compile(
+            r"\b(another|other|different) (user|account|customer)'?s?\b.{0,30}\b(cart|order|data|preferences?)\b", re.I
+        ),
+    ),
 ]
 
-_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f​-‏‪-‮⁠-⁤﻿]")
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]")
 
 
 def sanitize_user_text(text: str) -> str:

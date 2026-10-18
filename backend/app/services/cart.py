@@ -43,7 +43,9 @@ def _check_quantity(quantity: int, settings: Settings) -> None:
         raise ValidationFailed(f"You can buy at most {settings.max_item_quantity} units of one product")
 
 
-def add_item(db: Session, user_id: int, product_id: int, quantity: int, settings: Settings, *, commit: bool = True) -> Cart:
+def add_item(
+    db: Session, user_id: int, product_id: int, quantity: int, settings: Settings, *, commit: bool = True
+) -> Cart:
     _check_quantity(quantity, settings)
     product = lock_product(db, product_id)
     cart = get_or_create_cart(db, user_id)
@@ -117,11 +119,22 @@ def cart_view(cart: Cart, settings: Settings) -> dict[str, Any]:
             problem = f"Only {p.stock} available"
         if problem:
             issues.append(f"{p.name}: {problem}")
-        items.append({
-            "product_id": p.id, "sku": p.sku, "name": p.name, "brand": p.brand, "category": p.category,
-            "unit_price_inr": p.price_inr, "mrp_inr": p.mrp_inr, "quantity": it.quantity, "line_total_inr": line,
-            "stock": p.stock, "problem": problem, "key_specs": key_specs(p.category, p.specs),
-        })
+        items.append(
+            {
+                "product_id": p.id,
+                "sku": p.sku,
+                "name": p.name,
+                "brand": p.brand,
+                "category": p.category,
+                "unit_price_inr": p.price_inr,
+                "mrp_inr": p.mrp_inr,
+                "quantity": it.quantity,
+                "line_total_inr": line,
+                "stock": p.stock,
+                "problem": problem,
+                "key_specs": key_specs(p.category, p.specs),
+            }
+        )
     shipping = shipping_for(subtotal, settings)
     return {
         "items": items,

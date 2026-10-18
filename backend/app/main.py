@@ -20,8 +20,10 @@ class SecurityHeaders(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         length = request.headers.get("content-length")
         if length and length.isdigit() and int(length) > MAX_BODY_BYTES:
-            return JSONResponse({"error": {"code": "payload_too_large", "message": "Request body too large", "details": {}}},
-                                status_code=413)
+            return JSONResponse(
+                {"error": {"code": "payload_too_large", "message": "Request body too large", "details": {}}},
+                status_code=413,
+            )
         response = await call_next(request)
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("X-Frame-Options", "DENY")

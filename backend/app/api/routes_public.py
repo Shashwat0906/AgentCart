@@ -22,7 +22,6 @@ from app.schemas import (
     ComparisonOut,
     LoginIn,
     ProductDetailOut,
-    ProductOut,
     ProductPage,
     RegisterIn,
     TokenOut,
@@ -47,7 +46,7 @@ def ready(db: Session = Depends(get_db), provider: LLMProvider = Depends(get_pro
     try:
         db.execute(text("SELECT 1"))
         products = db.scalar(select(func.count()).select_from(Product)) or 0
-    except Exception:  # noqa: BLE001 - report not-ready instead of 500
+    except Exception:
         return JSONResponse({"status": "unavailable", "database": "down"}, status_code=503)
     return JSONResponse({"status": "ready", "database": "up", "products": products, "llm_provider": provider.name})
 
@@ -58,7 +57,9 @@ def _token(user: User) -> TokenOut:
     return TokenOut(access_token=token, expires_in=expires, user=UserOut.model_validate(user))
 
 
-@router.post("/auth/register", response_model=TokenOut, status_code=201, tags=["auth"], dependencies=[Depends(auth_limit)])
+@router.post(
+    "/auth/register", response_model=TokenOut, status_code=201, tags=["auth"], dependencies=[Depends(auth_limit)]
+)
 def register(body: RegisterIn, db: Session = Depends(get_db)) -> TokenOut:
     return _token(auth_service.register_user(db, body.email, body.password, body.display_name))
 
@@ -76,9 +77,18 @@ def me(user: User = Depends(get_current_user)) -> User:
 # ------------------------------------------------------------------ catalogue
 def product_out(p: Product) -> dict[str, Any]:
     return {
-        "id": p.id, "sku": p.sku, "name": p.name, "brand": p.brand, "category": p.category,
-        "price_inr": p.price_inr, "mrp_inr": p.mrp_inr, "rating": p.rating, "review_count": p.review_count,
-        "stock": p.stock, "in_stock": p.stock > 0, "tags": list(p.tags or []),
+        "id": p.id,
+        "sku": p.sku,
+        "name": p.name,
+        "brand": p.brand,
+        "category": p.category,
+        "price_inr": p.price_inr,
+        "mrp_inr": p.mrp_inr,
+        "rating": p.rating,
+        "review_count": p.review_count,
+        "stock": p.stock,
+        "in_stock": p.stock > 0,
+        "tags": list(p.tags or []),
         "key_specs": catalog.key_specs(p.category, p.specs or {}),
     }
 
@@ -108,15 +118,31 @@ def list_products(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     items, total = catalog.search_products(
-        db, q=q, category=category, brands=brand, min_price=min_price, max_price=max_price,
-        min_rating=min_rating, in_stock=in_stock, sort=sort, page=page, page_size=page_size,
+        db,
+        q=q,
+        category=category,
+        brands=brand,
+        min_price=min_price,
+        max_price=max_price,
+        min_rating=min_rating,
+        in_stock=in_stock,
+        sort=sort,
+        page=page,
+        page_size=page_size,
     )
-    return {"items": [product_out(p) for p in items], "total": total, "page": page, "page_size": page_size,
-            "pages": max(1, math.ceil(total / page_size))}
+    return {
+        "items": [product_out(p) for p in items],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "pages": max(1, math.ceil(total / page_size)),
+    }
 
 
 @router.get("/products/compare", response_model=ComparisonOut, tags=["catalog"])
-def compare(ids: str = Query(max_length=60, description="Comma-separated product ids (2–4)"), db: Session = Depends(get_db)) -> dict[str, Any]:
+def compare(
+    ids: str = Query(max_length=60, description="Comma-separated product ids (2–4)"), db: Session = Depends(get_db)
+) -> dict[str, Any]:
     try:
         id_list = list(dict.fromkeys(int(x) for x in ids.split(",") if x.strip()))
     except ValueError as exc:
@@ -133,12 +159,18 @@ def compare(ids: str = Query(max_length=60, description="Comma-separated product
 @router.get("/products/{product_id}", response_model=ProductDetailOut, tags=["catalog"])
 def product_detail(product_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
     p = catalog.get_product(db, product_id)
-    return {**product_out(p), "description": p.description, "specs": catalog.all_specs(p.category, p.specs or {}),
-            "raw_specs": p.specs or {}}
+    return {
+        **product_out(p),
+        "description": p.description,
+        "specs": catalog.all_specs(p.category, p.specs or {}),
+        "raw_specs": p.specs or {},
+    }
 
 
 @router.get("/config/public", tags=["health"])
-def public_config(settings: Settings = Depends(get_settings), provider: LLMProvider = Depends(get_provider)) -> dict[str, Any]:
+def public_config(
+    settings: Settings = Depends(get_settings), provider: LLMProvider = Depends(get_provider)
+) -> dict[str, Any]:
     return {
         "llm_provider": provider.name,
         "ranking_weights": settings.ranking_weights,

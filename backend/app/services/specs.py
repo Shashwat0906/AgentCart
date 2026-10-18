@@ -37,7 +37,9 @@ CATEGORY_LABELS: dict[str, str] = {
     "speakers": "Bluetooth Speakers",
 }
 
-_N, _B, _T = "number", "bool", "text"
+_N: SpecType = "number"
+_B: SpecType = "bool"
+_T: SpecType = "text"
 
 CATEGORY_SPECS: dict[str, list[SpecField]] = {
     "laptops": [

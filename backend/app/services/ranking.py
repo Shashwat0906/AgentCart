@@ -7,6 +7,7 @@ The same input always produces the same ranking. No LLM is involved here.
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -20,16 +21,28 @@ LOW_STOCK_THRESHOLD = 3
 
 
 class ProductLike(Protocol):
-    id: int
-    sku: str
-    name: str
-    brand: str
-    category: str
-    price_inr: int
-    rating: float
-    review_count: int
-    stock: int
-    specs: dict[str, Any]
+    """Read-only view satisfied by both ORM `Product` rows and frozen `ProductSnapshot`s."""
+
+    @property
+    def id(self) -> int: ...
+    @property
+    def sku(self) -> str: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def brand(self) -> str: ...
+    @property
+    def category(self) -> str: ...
+    @property
+    def price_inr(self) -> int: ...
+    @property
+    def rating(self) -> float: ...
+    @property
+    def review_count(self) -> int: ...
+    @property
+    def stock(self) -> int: ...
+    @property
+    def specs(self) -> dict[str, Any]: ...
 
 
 @dataclass
@@ -119,7 +132,7 @@ def _attr_label(category: str | None, attribute: str) -> str:
 # --------------------------------------------------------------------------- filtering
 
 
-def filter_products(products: list[ProductLike], intent: ShoppingIntent) -> FilterResult:
+def filter_products(products: Sequence[ProductLike], intent: ShoppingIntent) -> FilterResult:
     hard = intent.hard_constraints()
     eligible: list[ProductLike] = []
     oos: list[ProductLike] = []
@@ -172,7 +185,7 @@ def _pref_score(pref: SoftPreference, p: ProductLike, ranges: dict[str, tuple[fl
 
 
 def rank_products(
-    products: list[ProductLike],
+    products: Sequence[ProductLike],
     intent: ShoppingIntent,
     weights: dict[str, float] | None = None,
     *,
@@ -194,9 +207,7 @@ def rank_products(
         if pref.direction != "true":
             vals = [n for p in products if (n := _num(get_attr(p, pref.attribute))) is not None]
             ranges[pref.attribute] = _minmax(vals)
-    hard_numeric = [
-        c for c in intent.constraints if c.hard and c.op == "gte" and _num(c.value) not in (None, 0)
-    ]
+    hard_numeric = [c for c in intent.constraints if c.hard and c.op == "gte" and _num(c.value) not in (None, 0)]
     soft = intent.soft_constraints()
     preferred = {b.lower() for b in intent.preferred_brands}
 
@@ -251,7 +262,7 @@ def rank_products(
 def _explain(
     r: RankedProduct,
     intent: ShoppingIntent,
-    shortlist: list[ProductLike],
+    shortlist: Sequence[ProductLike],
     ranges: dict[str, tuple[float, float]],
 ) -> None:
     p = r.product
@@ -269,7 +280,9 @@ def _explain(
         if evaluate(c, p) is True:
             r.reasons.append(f"{c.label or c.attribute} ✓")
         else:
-            r.unmet.append(f"{c.label or c.attribute} — not met ({_attr_label(p.category, c.attribute)}: {describe(p, c.attribute)})")
+            r.unmet.append(
+                f"{c.label or c.attribute} — not met ({_attr_label(p.category, c.attribute)}: {describe(p, c.attribute)})"
+            )
     for pref in intent.preferences:
         if pref.direction == "true":
             continue
@@ -285,7 +298,8 @@ def _explain(
         elif rel >= 0.7:
             r.reasons.append(f"Strong {label.lower()} ({describe(p, pref.attribute)})")
         elif rel <= 0.3:
-            best_desc = format_spec_value(spec_field(p.category, pref.attribute), best) if spec_field(p.category, pref.attribute) else best
+            best_field = spec_field(p.category, pref.attribute)
+            best_desc = format_spec_value(best_field, best) if best_field else best
             r.tradeoffs.append(f"Weaker {label.lower()}: {describe(p, pref.attribute)} vs up to {best_desc}")
     if intent.preferred_brands and p.brand.lower() in {b.lower() for b in intent.preferred_brands}:
         r.reasons.append(f"From {p.brand}, a brand you prefer")
@@ -316,7 +330,7 @@ def _violation(c: Constraint, p: ProductLike) -> tuple[str, float]:
 
 
 def find_alternatives(
-    products: list[ProductLike],
+    products: Sequence[ProductLike],
     intent: ShoppingIntent,
     weights: dict[str, float] | None = None,
     limit: int = 3,
@@ -339,8 +353,9 @@ def find_alternatives(
     picked = scored[:limit]
     if not picked:
         return []
-    relaxed = intent.model_copy(update={"budget_max": None, "budget_min": None,
-                                        "constraints": [c for c in intent.constraints if not c.hard]})
+    relaxed = intent.model_copy(
+        update={"budget_max": None, "budget_min": None, "constraints": [c for c in intent.constraints if not c.hard]}
+    )
     ranked = rank_products([t[3] for t in picked], relaxed, weights)
     by_id = {t[3].id: t[4] for t in picked}
     order = {t[3].id: i for i, t in enumerate(picked)}

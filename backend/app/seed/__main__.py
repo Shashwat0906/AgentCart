@@ -18,10 +18,7 @@ def main() -> None:
     args = parser.parse_args()
     with get_sessionmaker()() as session:
         result = seed_catalog(session, reset_prices_and_stock=args.reset)
-    print(  # noqa: T201 - CLI output
-        f"Seed complete: {result['inserted']} inserted, {result['updated']} reset, "
-        f"{result['total']} products total"
-    )
+    print(f"Seed complete: {result['inserted']} inserted, {result['updated']} reset, {result['total']} products total")
 
 
 if __name__ == "__main__":

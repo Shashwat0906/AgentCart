@@ -58,7 +58,8 @@ def recommendation_summary(intent: ShoppingIntent, ranked: list[RankedProduct], 
     req = f" ({'; '.join(hard)})" if hard else ""
     top = ranked[0]
     parts = [
-        f"I found {n} {_cat(intent)} that meet all your requirements{req}." if n != 1
+        f"I found {n} {_cat(intent)} that meet all your requirements{req}."
+        if n != 1
         else f"I found 1 {_cat(intent, plural=False)} that meets all your requirements{req}.",
         f"My top pick is **{top.product.name}** at {format_inr(top.product.price_inr)} — {_first_clause(top.reasons)}.",
     ]
@@ -66,8 +67,11 @@ def recommendation_summary(intent: ShoppingIntent, ranked: list[RankedProduct], 
         parts.append(f"Trade-off: {top.unmet[0].split(' — ')[0].lower()} is not met.")
     others = ranked[1:3]
     if others:
-        parts.append("Also worth a look: " + " and ".join(
-            f"**{r.product.name}** ({format_inr(r.product.price_inr)})" for r in others) + ".")
+        parts.append(
+            "Also worth a look: "
+            + " and ".join(f"**{r.product.name}** ({format_inr(r.product.price_inr)})" for r in others)
+            + "."
+        )
     return " ".join(parts)
 
 
@@ -107,8 +111,13 @@ def polish_with_llm(
     if not provider.is_llm:
         return draft, "skipped"
     facts = [
-        {"name": r.product.name, "price": format_inr(r.product.price_inr), "rating": r.product.rating,
-         "reasons": r.reasons, "tradeoffs": r.tradeoffs + r.unmet + r.violations}
+        {
+            "name": r.product.name,
+            "price": format_inr(r.product.price_inr),
+            "rating": r.product.rating,
+            "reasons": r.reasons,
+            "tradeoffs": r.tradeoffs + r.unmet + r.violations,
+        }
         for r in shown
     ]
     # Product descriptions are deliberately NOT passed to the model (they are untrusted text).

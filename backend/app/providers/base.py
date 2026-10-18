@@ -61,8 +61,9 @@ class LLMProvider(ABC):
                     time.sleep(min(2.0, 0.4 * (2**attempt)))
         raise ProviderError(f"{self.name} failed after {self.max_retries + 1} attempts") from last
 
-    def _post(self, url: str, payload: dict[str, Any], headers: dict[str, str] | None = None,
-              *, timeout: float | None = None) -> dict[str, Any]:
+    def _post(
+        self, url: str, payload: dict[str, Any], headers: dict[str, str] | None = None, *, timeout: float | None = None
+    ) -> dict[str, Any]:
         with httpx.Client(timeout=timeout or self.timeout) as client:
             resp = client.post(url, json=payload, headers=headers or {})
         if resp.status_code >= 400:

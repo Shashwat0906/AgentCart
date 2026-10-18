@@ -60,15 +60,31 @@ class ToolBox:
             try:
                 result = fn()
                 count = len(result) if isinstance(result, list) else None
-                self.calls.append({"tool": name, "args": args, "ok": True, "attempts": attempt,
-                                   "result_count": count, "ms": round((time.perf_counter() - t0) * 1000, 1)})
+                self.calls.append(
+                    {
+                        "tool": name,
+                        "args": args,
+                        "ok": True,
+                        "attempts": attempt,
+                        "result_count": count,
+                        "ms": round((time.perf_counter() - t0) * 1000, 1),
+                    }
+                )
                 return result
             except OperationalError as exc:  # transient: retry once after rollback
                 last = exc
                 if self._on_retry:
                     self._on_retry()
-        self.calls.append({"tool": name, "args": args, "ok": False, "attempts": MAX_TOOL_ATTEMPTS,
-                           "result_count": None, "ms": round((time.perf_counter() - t0) * 1000, 1)})
+        self.calls.append(
+            {
+                "tool": name,
+                "args": args,
+                "ok": False,
+                "attempts": MAX_TOOL_ATTEMPTS,
+                "result_count": None,
+                "ms": round((time.perf_counter() - t0) * 1000, 1),
+            }
+        )
         assert last is not None
         raise last
 
@@ -125,7 +141,20 @@ def snapshots_from_seed() -> list[ProductSnapshot]:
 
     out = []
     for i, d in enumerate(iter_products(), start=1):
-        out.append(ProductSnapshot(id=i, sku=d["sku"], name=d["name"], brand=d["brand"], category=d["category"],
-                                   price_inr=d["price_inr"], mrp_inr=d["mrp_inr"], rating=d["rating"],
-                                   review_count=d["review_count"], stock=d["stock"], specs=d["specs"], tags=tuple(d["tags"])))
+        out.append(
+            ProductSnapshot(
+                id=i,
+                sku=d["sku"],
+                name=d["name"],
+                brand=d["brand"],
+                category=d["category"],
+                price_inr=d["price_inr"],
+                mrp_inr=d["mrp_inr"],
+                rating=d["rating"],
+                review_count=d["review_count"],
+                stock=d["stock"],
+                specs=d["specs"],
+                tags=tuple(d["tags"]),
+            )
+        )
     return out

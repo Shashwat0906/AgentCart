@@ -9,63 +9,182 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+from typing import Literal
 
-from app.agents.intent import Constraint, PreferenceProposal, ShoppingIntent, SoftPreference
+from app.agents.intent import Constraint, Op, PreferenceProposal, ShoppingIntent, SoftPreference
 from app.services.specs import format_inr
+
+Direction = Literal["max", "min", "true"]
 
 # --------------------------------------------------------------------------- vocab
 
 CATEGORY_SYNONYMS: dict[str, list[str]] = {
     "laptops": ["laptop", "laptops", "notebook", "notebooks", "macbook", "macbooks", "ultrabook", "ultrabooks"],
-    "smartphones": ["smartphone", "smartphones", "phone", "phones", "mobile", "mobiles", "iphone", "iphones", "handset", "cellphone"],
-    "headphones": ["headphones", "headphone", "earbuds", "earbud", "earphones", "earphone", "headset", "headsets", "tws", "airpods", "buds", "iems"],
+    "smartphones": [
+        "smartphone",
+        "smartphones",
+        "phone",
+        "phones",
+        "mobile",
+        "mobiles",
+        "iphone",
+        "iphones",
+        "handset",
+        "cellphone",
+    ],
+    "headphones": [
+        "headphones",
+        "headphone",
+        "earbuds",
+        "earbud",
+        "earphones",
+        "earphone",
+        "headset",
+        "headsets",
+        "tws",
+        "airpods",
+        "buds",
+        "iems",
+    ],
     "monitors": ["monitor", "monitors", "external display", "gaming display"],
     "tablets": ["tablet", "tablets", "ipad", "ipads", "tab"],
-    "smartwatches": ["smartwatch", "smartwatches", "smart watch", "smart watches", "watch", "watches", "fitness tracker", "fitness band", "running watch"],
+    "smartwatches": [
+        "smartwatch",
+        "smartwatches",
+        "smart watch",
+        "smart watches",
+        "watch",
+        "watches",
+        "fitness tracker",
+        "fitness band",
+        "running watch",
+    ],
     "keyboards": ["keyboard", "keyboards"],
     "mice": ["mouse", "mice"],
     "speakers": ["speaker", "speakers", "bluetooth speaker"],
 }
 
 # Words that imply a brand *only* when they also name the requested category.
-IMPLIED_BRAND = {"macbook": ("Apple", "laptops"), "macbooks": ("Apple", "laptops"),
-                 "iphone": ("Apple", "smartphones"), "iphones": ("Apple", "smartphones"),
-                 "ipad": ("Apple", "tablets"), "ipads": ("Apple", "tablets"),
-                 "airpods": ("Apple", "headphones")}
+IMPLIED_BRAND = {
+    "macbook": ("Apple", "laptops"),
+    "macbooks": ("Apple", "laptops"),
+    "iphone": ("Apple", "smartphones"),
+    "iphones": ("Apple", "smartphones"),
+    "ipad": ("Apple", "tablets"),
+    "ipads": ("Apple", "tablets"),
+    "airpods": ("Apple", "headphones"),
+}
 
 KNOWN_BRANDS = [
-    "Lenovo", "HP", "ASUS", "Acer", "Apple", "Dell", "MSI", "Samsung", "Microsoft", "Infinix",
-    "Zentrix", "OnePlus", "Google", "Xiaomi", "Redmi", "Poco", "Nothing", "iQOO", "Motorola", "Realme", "Vivo",
-    "Lava", "Sony", "Bose", "boAt", "JBL", "Sennheiser", "Audio-Technica", "Marshall", "LG",
-    "BenQ", "Alienware", "Amazfit", "Garmin", "Noise", "Fire-Boltt", "Logitech", "Keychron",
-    "Redragon", "HyperX", "Cosmic Byte", "Razer", "Ultimate Ears", "Tribit",
+    "Lenovo",
+    "HP",
+    "ASUS",
+    "Acer",
+    "Apple",
+    "Dell",
+    "MSI",
+    "Samsung",
+    "Microsoft",
+    "Infinix",
+    "Zentrix",
+    "OnePlus",
+    "Google",
+    "Xiaomi",
+    "Redmi",
+    "Poco",
+    "Nothing",
+    "iQOO",
+    "Motorola",
+    "Realme",
+    "Vivo",
+    "Lava",
+    "Sony",
+    "Bose",
+    "boAt",
+    "JBL",
+    "Sennheiser",
+    "Audio-Technica",
+    "Marshall",
+    "LG",
+    "BenQ",
+    "Alienware",
+    "Amazfit",
+    "Garmin",
+    "Noise",
+    "Fire-Boltt",
+    "Logitech",
+    "Keychron",
+    "Redragon",
+    "HyperX",
+    "Cosmic Byte",
+    "Razer",
+    "Ultimate Ears",
+    "Tribit",
 ]
-BRAND_ALIASES = {"redmi": "Xiaomi", "poco": "Xiaomi", "mi": "Xiaomi", "moto": "Motorola",
-                 "boat": "boAt", "ue": "Ultimate Ears", "audio technica": "Audio-Technica",
-                 "fire boltt": "Fire-Boltt", "fireboltt": "Fire-Boltt", "asus rog": "ASUS"}
+BRAND_ALIASES = {
+    "redmi": "Xiaomi",
+    "poco": "Xiaomi",
+    "mi": "Xiaomi",
+    "moto": "Motorola",
+    "boat": "boAt",
+    "ue": "Ultimate Ears",
+    "audio technica": "Audio-Technica",
+    "fire boltt": "Fire-Boltt",
+    "fireboltt": "Fire-Boltt",
+    "asus rog": "ASUS",
+}
 
-BATTERY_ATTR = {"laptops": "battery_hours", "smartphones": "battery_mah", "headphones": "battery_hours",
-                "tablets": "battery_hours", "smartwatches": "battery_days", "speakers": "battery_hours"}
+BATTERY_ATTR = {
+    "laptops": "battery_hours",
+    "smartphones": "battery_mah",
+    "headphones": "battery_hours",
+    "tablets": "battery_hours",
+    "smartwatches": "battery_days",
+    "speakers": "battery_hours",
+}
 WEIGHT_ATTR = {"laptops": "weight_kg", "headphones": "weight_g", "mice": "weight_g"}
-DISPLAY_ATTR = {"laptops": "display_inches", "smartphones": "display_inches", "tablets": "display_inches",
-                "monitors": "size_inches"}
+DISPLAY_ATTR = {
+    "laptops": "display_inches",
+    "smartphones": "display_inches",
+    "tablets": "display_inches",
+    "monitors": "size_inches",
+}
 
 _NUMBER_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "a pair of": 2, "a couple of": 2}
-_ORDINALS = {"first": 0, "1st": 0, "top": 0, "best": 0, "#1": 0, "second": 1, "2nd": 1, "#2": 1,
-             "third": 2, "3rd": 2, "#3": 2, "fourth": 3, "4th": 3, "fifth": 4, "5th": 4}
+_ORDINALS = {
+    "first": 0,
+    "1st": 0,
+    "top": 0,
+    "best": 0,
+    "#1": 0,
+    "second": 1,
+    "2nd": 1,
+    "#2": 1,
+    "third": 2,
+    "3rd": 2,
+    "#3": 2,
+    "fourth": 3,
+    "4th": 3,
+    "fifth": 4,
+    "5th": 4,
+}
 
-_UNIT_GUARD = (r"(?!\s*(?:gb|tb|mah|hz|mp|inch|inches|in\b|\"|w\b|watts?|dpi|h\b|hrs?|hours?|days?|kg|g\b|"
-               r"grams?|mm|ms|%|stars?|★|x\b|th\b|nd\b|rd\b|st\b|units?|pieces?|pcs|of them|core))")
+_UNIT_GUARD = (
+    r"(?!\s*(?:gb|tb|mah|hz|mp|inch|inches|in\b|\"|w\b|watts?|dpi|h\b|hrs?|hours?|days?|kg|g\b|"
+    r"grams?|mm|ms|%|stars?|★|x\b|th\b|nd\b|rd\b|st\b|units?|pieces?|pcs|of them|core))"
+)
 MONEY = re.compile(
     r"(?P<cur>₹|\brs\.?|\binr\b|\brupees?\b)?\s*"
     r"(?<![\d,.])(?P<num>\d{1,3}(?:,\d{2,3})+|\d+(?:\.\d+)?)(?![\d,.])\s*"
-    r"(?P<suf>k\b|thousand\b|lakhs?\b|lacs?\b|l\b|cr\b|crore\b)?" + _UNIT_GUARD
-    + r"(?:\s*(?:rs\.?|rupees|inr|/-))?",
+    r"(?P<suf>k\b|thousand\b|lakhs?\b|lacs?\b|l\b|cr\b|crore\b)?" + _UNIT_GUARD + r"(?:\s*(?:rs\.?|rupees|inr|/-))?",
     re.I,
 )
-_MAX_CUES = re.compile(r"(under|below|less than|lesser than|within|upto|up to|max(imum)?|no more than|not more than|"
-                       r"cheaper than|at most|budget( of| is| around| about)?|around|about|approx(imately)?|roughly|"
-                       r"~|spend|for)\s*$", re.I)
+_MAX_CUES = re.compile(
+    r"(under|below|less than|lesser than|within|upto|up to|max(imum)?|no more than|not more than|"
+    r"cheaper than|at most|budget( of| is| around| about)?|around|about|approx(imately)?|roughly|"
+    r"~|spend|for)\s*$",
+    re.I,
+)
 _APPROX_CUES = re.compile(r"(around|about|approx(imately)?|roughly|~)\s*$", re.I)
 _MIN_CUES = re.compile(r"(above|over|more than|at least|minimum|min|starting( from| at)?|from)\s*$", re.I)
 _MONEY_SIDE = r"(?:₹\s*|rs\.?\s*)?(?<![\d,.])\d[\d,]*(?:\.\d+)?(?![\d,.])\s*(?:k\b|lakhs?\b|lacs?\b)?"
@@ -75,11 +194,19 @@ _RANGE = re.compile(
     re.I,
 )
 
-_NEGATION = re.compile(r"(\bno\b|\bnot\b|\bavoid\w*|\bexcept\b|\bwithout\b|\bexclud\w*|\banything but\b|\bother than\b|"
-                       r"\bdon'?t (want|like)\b|\bnever\b|\bhate\b|\bnon\b|\bbesides\b)[\w\s,'-]{0,20}$", re.I)
-_PREFER = re.compile(r"(\bprefer\w*|\bideally\b|\blove\b|\blike\b|\bfan of\b|\bfavou?rite\b|\bpreferably\b|\bmaybe\b)[\w\s,'-]{0,20}$", re.I)
-_POSSESSIVE = re.compile(r"\b(for|with|to|pair with|connect to)\s+(my|our|a|an)\s+$|\bmy\s+$", re.I)
-_SOFT_CUE = re.compile(r"\b(prefer\w*|ideally|nice to have|bonus|if possible|would be nice|optional(ly)?|maybe)\b", re.I)
+_NEGATION = re.compile(
+    r"(\bno\b|\bnot\b|\bavoid\w*|\bexcept\b|\bwithout\b|\bexclud\w*|\banything but\b|\bother than\b|"
+    r"\bdon'?t (want|like)\b|\bnever\b|\bhate\b|\bnon\b|\bbesides\b)[\w\s,'-]{0,20}$",
+    re.I,
+)
+_PREFER = re.compile(
+    r"(\bprefer\w*|\bideally\b|\blove\b|\blike\b|\bfan of\b|\bfavou?rite\b|\bpreferably\b|\bmaybe\b)[\w\s,'-]{0,20}$",
+    re.I,
+)
+_POSSESSIVE = re.compile(r"\b(for|with|to|pair with|connect to|works with)\s+(my|our|a|an)\s+$", re.I)
+_SOFT_CUE = re.compile(
+    r"\b(prefer\w*|ideally|nice to have|bonus|if possible|would be nice|optional(ly)?|maybe)\b", re.I
+)
 
 
 def _word_re(phrase: str) -> re.Pattern[str]:
@@ -98,7 +225,7 @@ def _amount(num: str, suffix: str | None) -> int:
         value *= 100_000
     elif s in {"cr", "crore"}:
         value *= 10_000_000
-    return int(round(value))
+    return round(value)
 
 
 def _parse_money_token(token: str) -> int | None:
@@ -137,7 +264,7 @@ class RequestParser:
         for cat, rx in _CATEGORY_RES:
             m = rx.search(low)
             if m:
-                prefix = low[max(0, m.start() - 16): m.start()]
+                prefix = low[max(0, m.start() - 16) : m.start()]
                 # "headphones for my phone" — the phone is context, not the product.
                 if _POSSESSIVE.search(prefix):
                     continue
@@ -169,7 +296,7 @@ class RequestParser:
         for m in MONEY.finditer(low):
             cur, suf = m.group("cur"), m.group("suf")
             value = _amount(m.group("num"), suf)
-            before = low[max(0, m.start() - 30): m.start()]
+            before = low[max(0, m.start() - 30) : m.start()]
             has_cue = bool(_MAX_CUES.search(before) or _MIN_CUES.search(before))
             if not (cur or suf or (has_cue and value >= 500)):
                 continue
@@ -180,8 +307,8 @@ class RequestParser:
             elif _MIN_CUES.search(before) and not re.search(r"\b(for|budget)\s*$", before):
                 intent.budget_min = value
             elif _APPROX_CUES.search(before):
-                intent.budget_max = int(round(value * 1.1))
-                intent.budget_min = int(round(value * 0.8))
+                intent.budget_max = round(value * 1.1)
+                intent.budget_min = round(value * 0.8)
             else:
                 intent.budget_max = value
         if intent.budget_min and intent.budget_max and intent.budget_min > intent.budget_max:
@@ -193,7 +320,7 @@ class RequestParser:
         seen: set[tuple[str, int]] = set()
         for b in KNOWN_BRANDS:
             for m in _word_re(b.lower()).finditer(low):
-                after = low[m.end(): m.end() + 14]
+                after = low[m.end() : m.end() + 14]
                 # Brands that are also ordinary English words need extra evidence.
                 if b == "Noise" and not re.match(r"\s*(colorfit|smart ?watch|watch|brand|buds)", after):
                     continue
@@ -210,7 +337,7 @@ class RequestParser:
         exclude: list[str] = []
         prefer: list[str] = []
         for brand, pos in self._brand_mentions(low):
-            before = low[max(0, pos - 28): pos]
+            before = low[max(0, pos - 28) : pos]
             if _POSSESSIVE.search(before):
                 continue
             if _NEGATION.search(before):
@@ -221,42 +348,68 @@ class RequestParser:
                 include.append(brand)
         for word, (brand, cat) in IMPLIED_BRAND.items():
             m = _word_re(word).search(low)
-            if m and intent.category == cat and not _POSSESSIVE.search(low[max(0, m.start() - 16): m.start()]):
-                before = low[max(0, m.start() - 28): m.start()]
+            if m and intent.category == cat and not _POSSESSIVE.search(low[max(0, m.start() - 16) : m.start()]):
+                before = low[max(0, m.start() - 28) : m.start()]
                 (exclude if _NEGATION.search(before) else include).append(brand)
         include = [b for b in dict.fromkeys(include) if b not in exclude]
         if include:
-            intent.constraints.append(Constraint(attribute="brand", op="in", value=include,
-                                                 label="Brand: " + " or ".join(include)))
+            intent.constraints.append(
+                Constraint(attribute="brand", op="in", value=include, label="Brand: " + " or ".join(include))
+            )
         if exclude:
             ex = list(dict.fromkeys(exclude))
-            intent.constraints.append(Constraint(attribute="brand", op="not_in", value=ex,
-                                                 label="Not " + ", ".join(ex)))
+            intent.constraints.append(
+                Constraint(attribute="brand", op="not_in", value=ex, label="Not " + ", ".join(ex))
+            )
         intent.preferred_brands = [b for b in dict.fromkeys(prefer) if b not in exclude]
 
     # ------------------------------------------------------------------ numeric specs
-    def _add(self, intent: ShoppingIntent, attribute: str, op: str, value: float | int | bool | str | list[str],
-             label: str, hard: bool = True) -> None:
-        intent.constraints.append(Constraint(attribute=attribute, op=op, value=value, label=label, hard=hard))  # type: ignore[arg-type]
+    def _add(
+        self,
+        intent: ShoppingIntent,
+        attribute: str,
+        op: Op,
+        value: float | int | bool | str | list[str],
+        label: str,
+        hard: bool = True,
+    ) -> None:
+        intent.constraints.append(Constraint(attribute=attribute, op=op, value=value, label=label, hard=hard))
 
     def _specs(self, low: str, intent: ShoppingIntent) -> None:
+        m: re.Match[str] | None
+        n: float
         cat = intent.category
         soft = bool(_SOFT_CUE.search(low))
         ram_done = storage_done = False
 
-        for m in re.finditer(r"(\d+)\s*gb\s*(?:of\s*)?(?:ram|memory|unified memory)|(?:ram|memory)\s*(?:of\s*|:\s*)?(?:at least\s*|min(?:imum)?\s*)?(\d+)\s*gb", low):
+        for m in re.finditer(
+            r"(\d+)\s*gb\s*(?:of\s*)?(?:ram|memory|unified memory)|(?:ram|memory)\s*(?:of\s*|:\s*)?(?:at least\s*|min(?:imum)?\s*)?(\d+)\s*gb",
+            low,
+        ):
             n = int(m.group(1) or m.group(2))
             self._add(intent, "ram_gb", "gte", n, f"RAM ≥ {n} GB")
             ram_done = True
-        for m in re.finditer(r"(\d+(?:\.\d+)?)\s*(gb|tb)\s*(?:of\s*)?(?:ssd|storage|rom|internal|nvme|hdd|space)|(?:storage|ssd)\s*(?:of\s*|:\s*)?(?:at least\s*)?(\d+(?:\.\d+)?)\s*(gb|tb)", low):
+        for m in re.finditer(
+            r"(\d+(?:\.\d+)?)\s*(gb|tb)\s*(?:of\s*)?(?:ssd|storage|rom|internal|nvme|hdd|space)|(?:storage|ssd)\s*(?:of\s*|:\s*)?(?:at least\s*)?(\d+(?:\.\d+)?)\s*(gb|tb)",
+            low,
+        ):
             n = float(m.group(1) or m.group(3))
             unit = (m.group(2) or m.group(4)).lower()
             gb = int(n * 1024) if unit == "tb" else int(n)
-            self._add(intent, "storage_gb", "gte", gb, f"Storage ≥ {gb if gb < 1024 else gb // 1024} {'GB' if gb < 1024 else 'TB'}")
+            self._add(
+                intent,
+                "storage_gb",
+                "gte",
+                gb,
+                f"Storage ≥ {gb if gb < 1024 else gb // 1024} {'GB' if gb < 1024 else 'TB'}",
+            )
             storage_done = True
         # Bare "16 GB" with no qualifier: small numbers are RAM, large ones storage.
         if cat in {"laptops", "smartphones", "tablets"}:
-            for m in re.finditer(r"(?<![\d/])(\d+)\s*(gb|tb)\b(?!\s*(?:ram|memory|ssd|storage|rom|of|internal|nvme|hdd|space|unified|vram))", low):
+            for m in re.finditer(
+                r"(?<![\d/])(\d+)\s*(gb|tb)\b(?!\s*(?:ram|memory|ssd|storage|rom|of|internal|nvme|hdd|space|unified|vram))",
+                low,
+            ):
                 n, unit = int(m.group(1)), m.group(2)
                 ram_cap = 64 if cat == "laptops" else 24
                 if unit == "gb" and n <= ram_cap and not ram_done:
@@ -264,7 +417,13 @@ class RequestParser:
                     ram_done = True
                 elif not storage_done and (unit == "tb" or n >= 64):
                     gb = n * 1024 if unit == "tb" else n
-                    self._add(intent, "storage_gb", "gte", gb, f"Storage ≥ {gb if gb < 1024 else gb // 1024} {'GB' if gb < 1024 else 'TB'}")
+                    self._add(
+                        intent,
+                        "storage_gb",
+                        "gte",
+                        gb,
+                        f"Storage ≥ {gb if gb < 1024 else gb // 1024} {'GB' if gb < 1024 else 'TB'}",
+                    )
                     storage_done = True
 
         battery_attr = BATTERY_ATTR.get(cat or "")
@@ -296,17 +455,22 @@ class RequestParser:
         if m and cat == "mice":
             n = int(m.group(1))
             self._add(intent, "dpi", "gte", n, f"DPI ≥ {n}", hard=not soft)
-        m = re.search(r"(at least|minimum|min|over|above|under|below|max(?:imum)?|up to)?\s*(\d{1,2}(?:\.\d)?)\s*(?:-\s*)?(?:inch|inches|in\b|\"|”)", low)
+        m = re.search(
+            r"(at least|minimum|min|over|above|under|below|max(?:imum)?|up to)?\s*(\d{1,2}(?:\.\d)?)\s*(?:-\s*)?(?:inch|inches|in\b|\"|”)",
+            low,
+        )
         if m and cat in DISPLAY_ATTR:
             attr, n, cue = DISPLAY_ATTR[cat], float(m.group(2)), (m.group(1) or "")
             if cue in {"at least", "minimum", "min", "over", "above"}:
-                self._add(intent, attr, "gte", n, f"Screen ≥ {n:g}\"")
+                self._add(intent, attr, "gte", n, f'Screen ≥ {n:g}"')
             elif cue in {"under", "below", "max", "maximum", "up to"}:
-                self._add(intent, attr, "lte", n, f"Screen ≤ {n:g}\"")
+                self._add(intent, attr, "lte", n, f'Screen ≤ {n:g}"')
             else:
-                self._add(intent, attr, "gte", n - 0.6, f"Screen ≈ {n:g}\"")
-                self._add(intent, attr, "lte", n + 0.6, f"Screen ≈ {n:g}\"")
-        m = re.search(r"(?:under|below|less than|lighter than|max(?:imum)?|within)\s*(\d+(?:\.\d+)?)\s*(kg|g|grams)\b", low)
+                self._add(intent, attr, "gte", n - 0.6, f'Screen ≈ {n:g}"')
+                self._add(intent, attr, "lte", n + 0.6, f'Screen ≈ {n:g}"')
+        m = re.search(
+            r"(?:under|below|less than|lighter than|max(?:imum)?|within)\s*(\d+(?:\.\d+)?)\s*(kg|g|grams)\b", low
+        )
         if m and cat in WEIGHT_ATTR:
             n = float(m.group(1))
             attr = WEIGHT_ATTR[cat]
@@ -338,32 +502,70 @@ class RequestParser:
             m = re.search(pattern, low)
             if not m:
                 return
-            window = low[max(0, m.start() - 40): m.end() + 25]
+            window = low[max(0, m.start() - 40) : m.end() + 25]
             hard = not _SOFT_CUE.search(window)
-            negated = re.search(r"\b(no|without|don'?t need|not)\s+(\w+\s+){0,2}$", low[max(0, m.start() - 25): m.start()])
+            negated = re.search(
+                r"\b(no|without|don'?t need|not)\s+(\w+\s+){0,2}$", low[max(0, m.start() - 25) : m.start()]
+            )
             val = (not value) if negated else value
             final_label = label if val == value else f"No {label.lower()}"
             intent.constraints.append(Constraint(attribute=attribute, op="eq", value=val, label=final_label, hard=hard))
 
-        flag(r"upgrad\w*\s+(?:ssd|storage)|(?:ssd|storage)\s+(?:is\s+|that\s+is\s+|should be\s+)?upgrad\w*|expandable storage|extra (?:ssd|m\.?2) slot|m\.?2 slot|storage upgrade",
-             "storage_upgradeable", "Upgradeable storage", cats={"laptops"})
-        flag(r"upgrad\w*\s+(?:ram|memory)|(?:ram|memory)\s+(?:is\s+|should be\s+)?upgrad\w*|ram upgrade|so-?dimm",
-             "ram_upgradeable", "Upgradeable RAM", cats={"laptops"})
-        flag(r"dedicated (?:gpu|graphics)|graphics card|discrete (?:gpu|graphics)|\bnvidia\b|\brtx\b|\bgtx\b|\bcuda\b",
-             "dedicated_gpu", "Dedicated GPU", cats={"laptops"})
-        flag(r"expandable storage|micro ?sd|sd card|memory card", "expandable_storage", "Expandable storage", cats={"smartphones"})
+        flag(
+            r"upgrad\w*\s+(?:ssd|storage)|(?:ssd|storage)\s+(?:is\s+|that\s+is\s+|should be\s+)?upgrad\w*|expandable storage|extra (?:ssd|m\.?2) slot|m\.?2 slot|storage upgrade",
+            "storage_upgradeable",
+            "Upgradeable storage",
+            cats={"laptops"},
+        )
+        flag(
+            r"upgrad\w*\s+(?:ram|memory)|(?:ram|memory)\s+(?:is\s+|should be\s+)?upgrad\w*|ram upgrade|so-?dimm",
+            "ram_upgradeable",
+            "Upgradeable RAM",
+            cats={"laptops"},
+        )
+        flag(
+            r"dedicated (?:gpu|graphics)|graphics card|discrete (?:gpu|graphics)|\bnvidia\b|\brtx\b|\bgtx\b|\bcuda\b",
+            "dedicated_gpu",
+            "Dedicated GPU",
+            cats={"laptops"},
+        )
+        flag(
+            r"expandable storage|micro ?sd|sd card|memory card",
+            "expandable_storage",
+            "Expandable storage",
+            cats={"smartphones"},
+        )
         flag(r"\b5g\b", "has_5g", "5G support", cats={"smartphones"})
         flag(r"noise[- ]?cancel\w*|\banc\b", "anc", "Active noise cancelling", cats={"headphones"})
-        flag(r"\bwireless\b|\bbluetooth\b|\btws\b|\bcordless\b", "wireless", "Wireless", cats={"headphones", "keyboards", "mice"})
-        if cat in {"headphones", "keyboards", "mice"} and re.search(r"\bwired\b", low) and not re.search(r"\bwireless\b", low):
+        flag(
+            r"\bwireless\b|\bbluetooth\b|\btws\b|\bcordless\b",
+            "wireless",
+            "Wireless",
+            cats={"headphones", "keyboards", "mice"},
+        )
+        if (
+            cat in {"headphones", "keyboards", "mice"}
+            and re.search(r"\bwired\b", low)
+            and not re.search(r"\bwireless\b", low)
+        ):
             intent.constraints.append(Constraint(attribute="wireless", op="eq", value=False, label="Wired"))
         flag(r"\bgps\b", "gps", "Built-in GPS", cats={"smartwatches"})
         flag(r"stylus|\bpen\b|s ?pen|apple pencil|pencil support", "stylus_support", "Stylus support", cats={"tablets"})
         flag(r"cellular|\blte\b|\bsim\b|\b4g\b|\b5g\b", "cellular", "Cellular connectivity", cats={"tablets"})
         flag(r"\bmechanical\b", "mechanical", "Mechanical switches", cats={"keyboards"})
         flag(r"backlit|backlight\w*|\brgb\b", "backlit", "Backlit keys", cats={"keyboards"})
-        flag(r"waterproof|water[- ]?resistant|water[- ]?proof|\bip6[78]\b|swim", "waterproof", "Waterproof", cats={"speakers"})
-        flag(r"waterproof|water[- ]?resistant|water[- ]?proof|\bip6[78]\b|swim", "water_resistant", "Water resistant", cats={"smartwatches"})
+        flag(
+            r"waterproof|water[- ]?resistant|water[- ]?proof|\bip6[78]\b|swim",
+            "waterproof",
+            "Waterproof",
+            cats={"speakers"},
+        )
+        flag(
+            r"waterproof|water[- ]?resistant|water[- ]?proof|\bip6[78]\b|swim",
+            "water_resistant",
+            "Water resistant",
+            cats={"smartwatches"},
+        )
         flag(r"usb[- ]?c|type[- ]?c|thunderbolt", "usb_c", "USB-C connectivity", cats={"monitors"})
         flag(r"\bhdr\b", "hdr", "HDR support", cats={"monitors"})
         flag(r"\bergonomic\b", "ergonomic", "Ergonomic shape", cats={"mice"})
@@ -396,32 +598,50 @@ class RequestParser:
                 self._add(intent, "compatibility", "in", ["Android", "Android & iOS"], "Works with Android")
 
     # ------------------------------------------------------------------ soft prefs
-    def _pref(self, intent: ShoppingIntent, attribute: str | None, direction: str, label: str, weight: float = 1.0) -> None:
+    def _pref(
+        self, intent: ShoppingIntent, attribute: str | None, direction: Direction, label: str, weight: float = 1.0
+    ) -> None:
         if attribute is None:
             return
         if any(p.attribute == attribute for p in intent.preferences):
             return
-        intent.preferences.append(SoftPreference(attribute=attribute, direction=direction, label=label, weight=weight))  # type: ignore[arg-type]
+        intent.preferences.append(SoftPreference(attribute=attribute, direction=direction, label=label, weight=weight))
 
     def _soft_preferences(self, low: str, intent: ShoppingIntent) -> None:
         cat = intent.category or ""
-        if re.search(r"(good|great|long|longer|best|excellent|decent|strong|all[- ]day|long[- ]lasting|big|large|solid|massive)\s+battery|battery life|battery backup|lasts? all day", low):
+        if re.search(
+            r"(good|great|long|longer|best|excellent|decent|strong|all[- ]day|long[- ]lasting|big|large|solid|massive)\s+battery|battery life|battery backup|lasts? all day",
+            low,
+        ):
             self._pref(intent, BATTERY_ATTR.get(cat), "max", "Long battery life", 1.5)
-        if re.search(r"light ?weight|light-weight|portable|thin and light|easy to carry|\blight\b(?!\s*(gaming|use|usage|work|tasks?|editing|games|bar))", low):
+        if re.search(
+            r"light ?weight|light-weight|portable|thin and light|easy to carry|\blight\b(?!\s*(gaming|use|usage|work|tasks?|editing|games|bar))",
+            low,
+        ):
             self._pref(intent, WEIGHT_ATTR.get(cat), "min", "Lightweight", 1.2)
-        if cat == "smartphones" and re.search(r"(good|great|best|excellent|amazing|nice) camera|photograph\w*|photos|selfies?|camera phone", low):
+        if cat == "smartphones" and re.search(
+            r"(good|great|best|excellent|amazing|nice) camera|photograph\w*|photos|selfies?|camera phone", low
+        ):
             self._pref(intent, "main_camera_mp", "max", "Great camera", 1.5)
         if cat == "smartphones" and re.search(r"fast charg\w*|quick charg\w*|rapid charg\w*", low):
             self._pref(intent, "charging_w", "max", "Fast charging")
-        if cat in {"laptops", "smartphones", "monitors"} and re.search(r"high refresh|smooth (display|screen|scrolling)|high[- ]fps", low):
+        if cat in {"laptops", "smartphones", "monitors"} and re.search(
+            r"high refresh|smooth (display|screen|scrolling)|high[- ]fps", low
+        ):
             self._pref(intent, "refresh_hz", "max", "High refresh rate")
         if re.search(r"(big|large|larger|bigger)\s+(screen|display)", low):
             self._pref(intent, DISPLAY_ATTR.get(cat), "max", "Large screen")
         if re.search(r"\bcompact\b|\bsmall\b(?!\s*budget)", low) and cat in {"smartphones", "laptops", "tablets"}:
             self._pref(intent, DISPLAY_ATTR.get(cat), "min", "Compact size")
         if re.search(r"(more|lots of|plenty of|max(imum)?)\s+storage", low):
-            self._pref(intent, "storage_gb" if cat in {"laptops", "smartphones", "tablets"} else None, "max", "More storage")
-        if re.search(r"powerful|performance|fast\b|multitask\w*|heavy (use|work)", low) and cat in {"laptops", "smartphones", "tablets"}:
+            self._pref(
+                intent, "storage_gb" if cat in {"laptops", "smartphones", "tablets"} else None, "max", "More storage"
+            )
+        if re.search(r"powerful|performance|fast\b|multitask\w*|heavy (use|work)", low) and cat in {
+            "laptops",
+            "smartphones",
+            "tablets",
+        }:
             self._pref(intent, "ram_gb", "max", "Performance / more RAM", 0.8)
         if cat == "speakers" and re.search(r"\bloud\b|bass|powerful|party", low):
             self._pref(intent, "output_w", "max", "Loud output")
@@ -436,7 +656,10 @@ class RequestParser:
     def _use_cases(self, low: str, intent: ShoppingIntent) -> None:
         cat = intent.category or ""
         uc: list[str] = []
-        if re.search(r"machine learning|deep learning|\bml\b|\bai\b|data science|neural net\w*|training models?|pytorch|tensorflow|\bllms?\b|\bcuda\b", low):
+        if re.search(
+            r"machine learning|deep learning|\bml\b|\bai\b|data science|neural net\w*|training models?|pytorch|tensorflow|\bllms?\b|\bcuda\b",
+            low,
+        ):
             uc.append("machine learning")
             if cat == "laptops":
                 self._soft_flag(intent, "dedicated_gpu", "Dedicated GPU (helps with machine learning)")
@@ -470,7 +693,9 @@ class RequestParser:
                 self._pref(intent, "ram_gb", "max", "More RAM for multitasking", 0.8)
             elif cat == "monitors":
                 self._soft_flag(intent, "usb_c", "USB-C (single-cable laptop setup)")
-        if re.search(r"video editing|photo editing|content creat\w*|creator|graphic design|3d|rendering|premiere|davinci", low):
+        if re.search(
+            r"video editing|photo editing|content creat\w*|creator|graphic design|3d|rendering|premiere|davinci", low
+        ):
             uc.append("creative work")
             if cat == "laptops":
                 self._soft_flag(intent, "dedicated_gpu", "Dedicated GPU (faster rendering)")
@@ -502,7 +727,10 @@ class RequestParser:
 
     # ------------------------------------------------------------------ rating
     def _rating(self, low: str, intent: ShoppingIntent) -> None:
-        m = re.search(r"(?:rated|rating(?: of)?|at least|minimum|min|above|over)?\s*(\d(?:\.\d)?)\s*\+?\s*(?:stars?|★|star rating|/\s*5)|rated\s*(?:above|at least|over)?\s*(\d(?:\.\d)?)", low)
+        m = re.search(
+            r"(?:rated|rating(?: of)?|at least|minimum|min|above|over)?\s*(\d(?:\.\d)?)\s*\+?\s*(?:stars?|★|star rating|/\s*5)|rated\s*(?:above|at least|over)?\s*(\d(?:\.\d)?)",
+            low,
+        )
         if m:
             r = float(m.group(1) or m.group(2))
             if 1 <= r <= 5:
@@ -532,7 +760,10 @@ class RequestParser:
                 if re.search(rf"\b(add|buy|order|get|take)\s+{word}\b", low):
                     intent.cart_quantity = n
         if intent.wants_cart_add:
-            m = re.search(r"(?:\bthe\s+|#|\boption\s+|\bnumber\s+|\bno\.?\s*)(first|second|third|fourth|fifth|1st|2nd|3rd|4th|5th|top|best|[1-5])\b", low)
+            m = re.search(
+                r"(?:\bthe\s+|#|\boption\s+|\bnumber\s+|\bno\.?\s*)(first|second|third|fourth|fifth|1st|2nd|3rd|4th|5th|top|best|[1-5])\b",
+                low,
+            )
             if m:
                 tok = m.group(1)
                 intent.reference_index = int(tok) - 1 if tok.isdigit() else _ORDINALS[tok]
@@ -542,7 +773,10 @@ class RequestParser:
                 intent.keywords.append("__cheapest_ref__")
 
     def _sort_hint(self, low: str, intent: ShoppingIntent) -> None:
-        if re.search(r"cheap(est|er)?\b|affordable|inexpensive|lowest price|budget[- ]friendly|least expensive|less expensive|value for money", low):
+        if re.search(
+            r"cheap(est|er)?\b|affordable|inexpensive|lowest price|budget[- ]friendly|least expensive|less expensive|value for money",
+            low,
+        ):
             intent.sort_hint = "cheapest"
         elif re.search(r"best[- ]rated|top[- ]rated|highest[- ]rated|best reviews|most reliable|highly rated", low):
             intent.sort_hint = "best_rated"
@@ -551,7 +785,10 @@ class RequestParser:
 
     # ------------------------------------------------------------------ intent kind
     def _kind(self, low: str, intent: ShoppingIntent) -> None:
-        if re.search(r"^(start over|reset|new search|clear (the )?(chat|context|conversation))\b|\bforget (that|everything|it)\b|\bstart (again|fresh|over)\b", low):
+        if re.search(
+            r"^(start over|reset|new search|clear (the )?(chat|context|conversation))\b|\bforget (that|everything|it)\b|\bstart (again|fresh|over)\b",
+            low,
+        ):
             intent.kind = "reset"
             return
         pref = self._preference_statement(low, intent)
@@ -567,7 +804,10 @@ class RequestParser:
         if pref and not intent.category:
             intent.kind = "save_preference"
             return
-        if not has_shopping_signal and re.search(r"^(hi|hello|hey|namaste|good (morning|evening|afternoon))\b|what can you do|\bhelp\b|how does this work|who are you", low):
+        if not has_shopping_signal and re.search(
+            r"^(hi|hello|hey|namaste|good (morning|evening|afternoon))\b|what can you do|\bhelp\b|how does this work|who are you",
+            low,
+        ):
             intent.kind = "help"
             return
         intent.kind = "search"
@@ -576,7 +816,7 @@ class RequestParser:
         if not re.search(r"\b(remember|always|never|from now on|in future|going forward|save (this|my|that))\b", low):
             return None
         for brand, pos in self._brand_mentions(low):
-            before = low[max(0, pos - 28): pos]
+            before = low[max(0, pos - 28) : pos]
             if _NEGATION.search(before):
                 return PreferenceProposal(kind="avoided_brand", value=brand)
             return PreferenceProposal(kind="preferred_brand", value=brand)

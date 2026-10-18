@@ -31,10 +31,7 @@ def get_conversation(db: Session, user_id: int, conversation_id: str) -> Convers
 
 
 def list_conversations(db: Session, user_id: int) -> list[dict[str, Any]]:
-    counts = (
-        select(Message.conversation_id, func.count().label("n"))
-        .group_by(Message.conversation_id).subquery()
-    )
+    counts = select(Message.conversation_id, func.count().label("n")).group_by(Message.conversation_id).subquery()
     rows = db.execute(
         select(Conversation, counts.c.n)
         .outerjoin(counts, counts.c.conversation_id == Conversation.id)
@@ -42,8 +39,16 @@ def list_conversations(db: Session, user_id: int) -> list[dict[str, Any]]:
         .order_by(Conversation.updated_at.desc())
         .limit(100)
     ).all()
-    return [{"id": c.id, "title": c.title, "created_at": c.created_at, "updated_at": c.updated_at,
-             "message_count": int(n or 0)} for c, n in rows]
+    return [
+        {
+            "id": c.id,
+            "title": c.title,
+            "created_at": c.created_at,
+            "updated_at": c.updated_at,
+            "message_count": int(n or 0),
+        }
+        for c, n in rows
+    ]
 
 
 def delete_conversation(db: Session, user_id: int, conversation_id: str) -> None:
@@ -61,8 +66,13 @@ def message_view(m: Message, actions: list[AgentAction] | None = None) -> dict[s
 
 def conversation_detail(db: Session, conv: Conversation) -> dict[str, Any]:
     actions = list(db.scalars(select(AgentAction).where(AgentAction.conversation_id == conv.id)))
-    return {"id": conv.id, "title": conv.title, "created_at": conv.created_at, "updated_at": conv.updated_at,
-            "messages": [message_view(m, actions) for m in conv.messages]}
+    return {
+        "id": conv.id,
+        "title": conv.title,
+        "created_at": conv.created_at,
+        "updated_at": conv.updated_at,
+        "messages": [message_view(m, actions) for m in conv.messages],
+    }
 
 
 def _title(text: str) -> str:
@@ -109,8 +119,9 @@ def handle_message(
         conv.context = {}
     elif result.response_type in {"recommendations", "no_results"} and result.intent is not None:
         shown = result.recommendations or result.alternatives
-        conv.context = build_context(result.intent, [c["product_id"] for c in shown],
-                                     shown[0]["price_inr"] if shown else None)
+        conv.context = build_context(
+            result.intent, [c["product_id"] for c in shown], shown[0]["price_inr"] if shown else None
+        )
     elif result.response_type == "comparison" and result.recommendations:
         ctx = dict(conv.context or {})
         ctx["last_recommendation_ids"] = [c["product_id"] for c in result.recommendations]

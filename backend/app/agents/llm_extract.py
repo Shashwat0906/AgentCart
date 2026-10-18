@@ -34,7 +34,9 @@ def _attribute_catalogue() -> str:
     return json.dumps({c: [f.key for f in fields] for c, fields in CATEGORY_SPECS.items()})
 
 
-def enrich_with_llm(provider: LLMProvider, text: str, intent: ShoppingIntent, *, deadline: float | None = None) -> tuple[ShoppingIntent, list[str]]:
+def enrich_with_llm(
+    provider: LLMProvider, text: str, intent: ShoppingIntent, *, deadline: float | None = None
+) -> tuple[ShoppingIntent, list[str]]:
     if not provider.is_llm:
         return intent, []
     system = SYSTEM_PROMPT.format(categories=list(CATEGORY_SPECS), attributes=_attribute_catalogue())
@@ -66,8 +68,16 @@ def merge_llm_output(intent: ShoppingIntent, data: dict[str, Any], text: str) ->
         if not isinstance(value, int | float | bool | str):
             continue
         f = spec_field(it.category, attr)
-        it.constraints.append(Constraint(attribute=attr, op=op, value=value, hard=False, source="llm",
-                                         label=f"{f.label if f else attr} (suggested)"))
+        it.constraints.append(
+            Constraint(
+                attribute=attr,
+                op=op,
+                value=value,
+                hard=False,
+                source="llm",
+                label=f"{f.label if f else attr} (suggested)",
+            )
+        )
         existing.add(attr)
     for raw in data.get("preferences") or []:
         if not isinstance(raw, dict):

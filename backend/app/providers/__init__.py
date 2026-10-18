@@ -15,16 +15,22 @@ __all__ = ["LLMProvider", "MockProvider", "ProviderError", "build_provider"]
 
 
 def build_provider(settings: Settings) -> LLMProvider:
-    kw = {"timeout": settings.llm_timeout_seconds, "max_retries": settings.llm_max_retries}
+    timeout, retries = settings.llm_timeout_seconds, settings.llm_max_retries
     try:
         if settings.llm_provider == "ollama":
-            return OllamaProvider(settings.ollama_base_url, settings.ollama_model, **kw)
+            return OllamaProvider(settings.ollama_base_url, settings.ollama_model, timeout=timeout, max_retries=retries)
         if settings.llm_provider == "openai_compatible":
             return OpenAICompatibleProvider(
-                settings.hosted_llm_base_url, settings.hosted_llm_api_key, settings.hosted_llm_model, **kw
+                settings.hosted_llm_base_url,
+                settings.hosted_llm_api_key,
+                settings.hosted_llm_model,
+                timeout=timeout,
+                max_retries=retries,
             )
         if settings.llm_provider == "anthropic":
-            return AnthropicProvider(settings.anthropic_api_key, settings.anthropic_model, **kw)
+            return AnthropicProvider(
+                settings.anthropic_api_key, settings.anthropic_model, timeout=timeout, max_retries=retries
+            )
     except ProviderError as exc:
         logger.warning("LLM provider %s unavailable (%s); using mock", settings.llm_provider, exc)
-    return MockProvider(**kw)
+    return MockProvider(timeout=timeout, max_retries=retries)

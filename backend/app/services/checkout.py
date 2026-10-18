@@ -33,9 +33,15 @@ def create_quote(db: Session, user_id: int, settings: Settings) -> tuple[Checkou
     if view["issues"]:
         raise ConflictError("Some items can't be ordered right now", details={"issues": view["issues"]})
     quote = CheckoutQuote(
-        id=str(uuid.uuid4()), user_id=user_id,
-        items=[{"product_id": i["product_id"], "quantity": i["quantity"], "unit_price_inr": i["unit_price_inr"]} for i in view["items"]],
-        subtotal_inr=view["subtotal_inr"], shipping_inr=view["shipping_inr"], total_inr=view["total_inr"],
+        id=str(uuid.uuid4()),
+        user_id=user_id,
+        items=[
+            {"product_id": i["product_id"], "quantity": i["quantity"], "unit_price_inr": i["unit_price_inr"]}
+            for i in view["items"]
+        ],
+        subtotal_inr=view["subtotal_inr"],
+        shipping_inr=view["shipping_inr"],
+        total_inr=view["total_inr"],
         expires_at=_now() + timedelta(seconds=settings.checkout_quote_ttl_seconds),
     )
     db.add(quote)
@@ -57,17 +63,23 @@ def confirm(db: Session, user_id: int, quote_id: str, idempotency_key: str, sett
     if quote.used_at is not None:
         raise ConflictError("This checkout quote was already used", details={"reason": "quote_used"})
     if _aware(quote.expires_at) <= _now():
-        raise ConflictError("Your checkout quote expired. Please review your cart again.", details={"reason": "quote_expired"})
+        raise ConflictError(
+            "Your checkout quote expired. Please review your cart again.", details={"reason": "quote_expired"}
+        )
 
     cart = get_or_create_cart(db, user_id)
     cart_state = sorted((i.product_id, i.quantity) for i in cart.items)
     quoted_state = sorted((int(i["product_id"]), int(i["quantity"])) for i in quote.items)
     if cart_state != quoted_state:
-        raise ConflictError("Your cart changed after the quote. Please review it again.", details={"reason": "cart_changed"})
+        raise ConflictError(
+            "Your cart changed after the quote. Please review it again.", details={"reason": "cart_changed"}
+        )
 
     # Lock rows in a stable order to avoid deadlocks, then re-check price and stock.
     ids = sorted(pid for pid, _ in quoted_state)
-    products = {p.id: p for p in db.scalars(select(Product).where(Product.id.in_(ids)).order_by(Product.id).with_for_update())}
+    products = {
+        p.id: p for p in db.scalars(select(Product).where(Product.id.in_(ids)).order_by(Product.id).with_for_update())
+    }
     price_changes, stock_problems = [], []
     for item in quote.items:
         p = products.get(int(item["product_id"]))
@@ -75,9 +87,18 @@ def confirm(db: Session, user_id: int, quote_id: str, idempotency_key: str, sett
             stock_problems.append({"product_id": item["product_id"], "name": "Unavailable product", "available": 0})
             continue
         if p.price_inr != int(item["unit_price_inr"]):
-            price_changes.append({"product_id": p.id, "name": p.name, "quoted_price_inr": item["unit_price_inr"], "current_price_inr": p.price_inr})
+            price_changes.append(
+                {
+                    "product_id": p.id,
+                    "name": p.name,
+                    "quoted_price_inr": item["unit_price_inr"],
+                    "current_price_inr": p.price_inr,
+                }
+            )
         if p.stock < int(item["quantity"]):
-            stock_problems.append({"product_id": p.id, "name": p.name, "requested": item["quantity"], "available": p.stock})
+            stock_problems.append(
+                {"product_id": p.id, "name": p.name, "requested": item["quantity"], "available": p.stock}
+            )
     if price_changes:
         db.rollback()
         first = price_changes[0]
@@ -88,18 +109,36 @@ def confirm(db: Session, user_id: int, quote_id: str, idempotency_key: str, sett
         )
     if stock_problems:
         db.rollback()
-        raise ConflictError("Some items no longer have enough stock", details={"reason": "insufficient_stock", "items": stock_problems})
+        raise ConflictError(
+            "Some items no longer have enough stock", details={"reason": "insufficient_stock", "items": stock_problems}
+        )
 
     subtotal = sum(products[int(i["product_id"])].price_inr * int(i["quantity"]) for i in quote.items)
     shipping = shipping_for(subtotal, settings)
-    order = Order(user_id=user_id, quote_id=quote.id, idempotency_key=idempotency_key, status="confirmed",
-                  payment_mode="demo", subtotal_inr=subtotal, shipping_inr=shipping, total_inr=subtotal + shipping)
+    order = Order(
+        user_id=user_id,
+        quote_id=quote.id,
+        idempotency_key=idempotency_key,
+        status="confirmed",
+        payment_mode="demo",
+        subtotal_inr=subtotal,
+        shipping_inr=shipping,
+        total_inr=subtotal + shipping,
+    )
     for item in quote.items:
         p = products[int(item["product_id"])]
         qty = int(item["quantity"])
         p.stock -= qty
-        order.items.append(OrderItem(product_id=p.id, sku=p.sku, name=p.name, unit_price_inr=p.price_inr,
-                                     quantity=qty, line_total_inr=p.price_inr * qty))
+        order.items.append(
+            OrderItem(
+                product_id=p.id,
+                sku=p.sku,
+                name=p.name,
+                unit_price_inr=p.price_inr,
+                quantity=qty,
+                line_total_inr=p.price_inr * qty,
+            )
+        )
     db.add(order)
     quote.used_at = _now()
     cart.items.clear()
@@ -115,7 +154,9 @@ def confirm(db: Session, user_id: int, quote_id: str, idempotency_key: str, sett
 
 
 def list_orders(db: Session, user_id: int) -> list[Order]:
-    return list(db.scalars(select(Order).where(Order.user_id == user_id).order_by(Order.created_at.desc(), Order.id.desc())))
+    return list(
+        db.scalars(select(Order).where(Order.user_id == user_id).order_by(Order.created_at.desc(), Order.id.desc()))
+    )
 
 
 def get_order(db: Session, user_id: int, order_id: int) -> Order:
@@ -127,8 +168,22 @@ def get_order(db: Session, user_id: int, order_id: int) -> Order:
 
 def order_view(o: Order) -> dict[str, Any]:
     return {
-        "id": o.id, "status": o.status, "payment_mode": o.payment_mode, "subtotal_inr": o.subtotal_inr,
-        "shipping_inr": o.shipping_inr, "total_inr": o.total_inr, "created_at": o.created_at,
-        "items": [{"product_id": i.product_id, "sku": i.sku, "name": i.name, "unit_price_inr": i.unit_price_inr,
-                   "quantity": i.quantity, "line_total_inr": i.line_total_inr} for i in o.items],
+        "id": o.id,
+        "status": o.status,
+        "payment_mode": o.payment_mode,
+        "subtotal_inr": o.subtotal_inr,
+        "shipping_inr": o.shipping_inr,
+        "total_inr": o.total_inr,
+        "created_at": o.created_at,
+        "items": [
+            {
+                "product_id": i.product_id,
+                "sku": i.sku,
+                "name": i.name,
+                "unit_price_inr": i.unit_price_inr,
+                "quantity": i.quantity,
+                "line_total_inr": i.line_total_inr,
+            }
+            for i in o.items
+        ],
     }

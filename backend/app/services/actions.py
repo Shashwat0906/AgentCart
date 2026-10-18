@@ -36,20 +36,26 @@ def _aware(dt: datetime) -> datetime:
     return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
 
 
-def persist_actions(db: Session, user_id: int, conversation_id: str | None, proposals: list[dict[str, Any]],
-                    settings: Settings) -> list[AgentAction]:
+def persist_actions(
+    db: Session, user_id: int, conversation_id: str | None, proposals: list[dict[str, Any]], settings: Settings
+) -> list[AgentAction]:
     if proposals and conversation_id:
         # Older pending proposals in this conversation are superseded so stale ones can't be approved later.
-        for old in db.scalars(select(AgentAction).where(
-            AgentAction.conversation_id == conversation_id, AgentAction.status == "pending"
-        )):
+        for old in db.scalars(
+            select(AgentAction).where(AgentAction.conversation_id == conversation_id, AgentAction.status == "pending")
+        ):
             old.status = "superseded"
             old.decided_at = _now()
     out = []
     for p in proposals:
         action = AgentAction(
-            id=str(uuid.uuid4()), user_id=user_id, conversation_id=conversation_id, kind=p["kind"],
-            payload=p["payload"], summary=p["summary"][:300], status="pending",
+            id=str(uuid.uuid4()),
+            user_id=user_id,
+            conversation_id=conversation_id,
+            kind=p["kind"],
+            payload=p["payload"],
+            summary=p["summary"][:300],
+            status="pending",
             expires_at=_now() + timedelta(minutes=settings.agent_action_ttl_minutes),
         )
         db.add(action)
@@ -123,18 +129,30 @@ def _execute_add_to_cart(db: Session, user_id: int, action: AgentAction, setting
         action.status = "superseded"
         action.decided_at = _now()
         action.result = {"reason": "price_changed", "old_price_inr": expected, "new_price_inr": product.price_inr}
-        fresh = persist_actions(db, user_id, None, [{
-            "kind": "add_to_cart",
-            "payload": {**payload, "expected_price_inr": product.price_inr},
-            "summary": f"Add {qty} × {product.name} ({format_inr(product.price_inr)} each) to your cart",
-        }], settings)[0]
+        fresh = persist_actions(
+            db,
+            user_id,
+            None,
+            [
+                {
+                    "kind": "add_to_cart",
+                    "payload": {**payload, "expected_price_inr": product.price_inr},
+                    "summary": f"Add {qty} × {product.name} ({format_inr(product.price_inr)} each) to your cart",
+                }
+            ],
+            settings,
+        )[0]
         fresh.conversation_id = action.conversation_id
         db.commit()
         raise ConflictError(
             f"The price of {product.name} changed from {format_inr(expected)} to {format_inr(product.price_inr)}. "
             "Please review and approve the updated proposal.",
-            details={"reason": "price_changed", "old_price_inr": expected, "new_price_inr": product.price_inr,
-                     "new_action_id": fresh.id},
+            details={
+                "reason": "price_changed",
+                "old_price_inr": expected,
+                "new_price_inr": product.price_inr,
+                "new_action_id": fresh.id,
+            },
         )
     try:
         cart_service.add_item(db, user_id, product_id, qty, settings, commit=False)
@@ -162,7 +180,14 @@ def _execute_save_preference(db: Session, user_id: int, action: AgentAction) -> 
 
 def action_view(a: AgentAction) -> dict[str, Any]:
     return {
-        "id": a.id, "kind": a.kind, "status": a.status, "summary": a.summary, "payload": a.payload,
-        "result": a.result or {}, "conversation_id": a.conversation_id,
-        "created_at": a.created_at, "expires_at": a.expires_at, "decided_at": a.decided_at,
+        "id": a.id,
+        "kind": a.kind,
+        "status": a.status,
+        "summary": a.summary,
+        "payload": a.payload,
+        "result": a.result or {},
+        "conversation_id": a.conversation_id,
+        "created_at": a.created_at,
+        "expires_at": a.expires_at,
+        "decided_at": a.decided_at,
     }
