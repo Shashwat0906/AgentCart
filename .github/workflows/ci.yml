@@ -39,7 +39,7 @@ jobs:
       TEST_DATABASE_URL: postgresql+psycopg://agentcart:ci-only-not-a-secret@localhost:5432/agentcart_test
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -105,7 +105,7 @@ jobs:
       RATE_LIMIT_ENABLED: "false"
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
