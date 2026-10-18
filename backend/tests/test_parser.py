@@ -28,6 +28,8 @@ def constraint(intent, attribute, op=None):  # type: ignore[no-untyped-def]
         ("phone around 20k", 16000, 22000),
         ("phone with 5000 mAh battery", None, None),  # mAh must not be read as money
         ("laptop with i5-12450H and RTX 3050", None, None),
+        ("4K monitor with USB-C", None, None),  # 4K is a resolution, not ₹4,000
+        ("mouse under 4k", None, 4000),
     ],
 )
 def test_budget_parsing(text: str, bmin: int | None, bmax: int | None) -> None:

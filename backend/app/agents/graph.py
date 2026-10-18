@@ -386,6 +386,11 @@ def propose_actions(state: AgentState, deps: AgentDeps) -> dict[str, Any]:
                 else "I couldn't propose that cart change."
             )
     pref = intent.preference_to_save
+    if pref is not None and state.get("security_flags"):
+        notices.append(
+            "I didn't offer to save a preference because the message contained instructions aimed at the assistant."
+        )
+        pref = None
     if pref is not None:
         reason = sensitive_reason(pref.value)
         if reason:

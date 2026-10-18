@@ -80,6 +80,18 @@ def _title(text: str) -> str:
     return (t[:57] + "…") if len(t) > 60 else (t or "New conversation")
 
 
+def next_context(result: AgentResult, current: dict[str, Any]) -> dict[str, Any]:
+    """Short-term working memory after one agent turn (shared with the evaluation harness)."""
+    if result.response_type == "reset":
+        return {}
+    if result.response_type in {"recommendations", "no_results"} and result.intent is not None:
+        shown = result.recommendations or result.alternatives
+        return build_context(result.intent, [c["product_id"] for c in shown], shown[0]["price_inr"] if shown else None)
+    if result.response_type == "comparison" and result.recommendations:
+        return {**current, "last_recommendation_ids": [c["product_id"] for c in result.recommendations]}
+    return current
+
+
 def handle_message(
     db: Session,
     user_id: int,
@@ -114,18 +126,7 @@ def handle_message(
     )
     result = run_agent(text, deps, context=dict(conv.context or {}), saved_preferences=prefs, weights=weights)
 
-    # Update short-term working memory.
-    if result.response_type == "reset":
-        conv.context = {}
-    elif result.response_type in {"recommendations", "no_results"} and result.intent is not None:
-        shown = result.recommendations or result.alternatives
-        conv.context = build_context(
-            result.intent, [c["product_id"] for c in shown], shown[0]["price_inr"] if shown else None
-        )
-    elif result.response_type == "comparison" and result.recommendations:
-        ctx = dict(conv.context or {})
-        ctx["last_recommendation_ids"] = [c["product_id"] for c in result.recommendations]
-        conv.context = ctx
+    conv.context = next_context(result, dict(conv.context or {}))
 
     actions = action_service.persist_actions(db, user_id, conv.id, result.proposed_actions, settings)
     payload = result.payload()

@@ -300,6 +300,9 @@ class RequestParser:
             has_cue = bool(_MAX_CUES.search(before) or _MIN_CUES.search(before))
             if not (cur or suf or (has_cue and value >= 500)):
                 continue
+            # "4K monitor", "8K TV": a bare 2K/4K/5K/8K without currency or budget cue is a resolution.
+            if (suf or "").lower() == "k" and not cur and not has_cue and m.group("num") in {"2", "4", "5", "8"}:
+                continue
             if value < 100:
                 continue
             if re.search(r"\b(nothing|not|no|never)\s+(over|above|more than|beyond|exceeding)\s*$", before):
@@ -813,7 +816,12 @@ class RequestParser:
         intent.kind = "search"
 
     def _preference_statement(self, low: str, intent: ShoppingIntent) -> PreferenceProposal | None:
-        if not re.search(r"\b(remember|always|never|from now on|in future|going forward|save (this|my|that))\b", low):
+        # Only explicit statements about the shopper themselves, not any sentence containing "always".
+        if not re.search(
+            r"\bremember\b|\bsave (this|my|that)\b|\bi (always|usually|never|only|mostly) (buy|prefer|choose|go for|use|like|want|shop|pick|keep)\b"
+            r"|\b(always|never) (buy|prefer|choose|go for|pick)\b|\bfrom now on,? (i|my)\b|\bmy (usual|typical)\b|\balways keep my\b",
+            low,
+        ):
             return None
         for brand, pos in self._brand_mentions(low):
             before = low[max(0, pos - 28) : pos]
