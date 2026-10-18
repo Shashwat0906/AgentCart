@@ -38,7 +38,7 @@ jobs:
       DATABASE_URL: postgresql+psycopg://agentcart:ci-only-not-a-secret@localhost:5432/agentcart_test
       TEST_DATABASE_URL: postgresql+psycopg://agentcart:ci-only-not-a-secret@localhost:5432/agentcart_test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -70,7 +70,7 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -104,7 +104,7 @@ jobs:
       CORS_ORIGINS: http://localhost:4173
       RATE_LIMIT_ENABLED: "false"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -150,7 +150,7 @@ jobs:
     name: Docker images build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: docker build -t agentcart-backend ./backend
       - run: docker build -t agentcart-frontend ./frontend
 
@@ -158,7 +158,7 @@ jobs:
     name: Secret scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       # The pinned gitleaks CLI scans the full history. gitleaks-action@v2 derives a
