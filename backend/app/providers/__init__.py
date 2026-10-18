@@ -1,0 +1,30 @@
+"""Provider factory. Falls back to the mock provider if a configured provider is unusable."""
+
+from __future__ import annotations
+
+import logging
+
+from app.core.config import Settings
+from app.providers.base import LLMProvider, ProviderError
+from app.providers.mock import MockProvider
+from app.providers.remote import AnthropicProvider, OllamaProvider, OpenAICompatibleProvider
+
+logger = logging.getLogger("agentcart.providers")
+
+__all__ = ["LLMProvider", "MockProvider", "ProviderError", "build_provider"]
+
+
+def build_provider(settings: Settings) -> LLMProvider:
+    kw = {"timeout": settings.llm_timeout_seconds, "max_retries": settings.llm_max_retries}
+    try:
+        if settings.llm_provider == "ollama":
+            return OllamaProvider(settings.ollama_base_url, settings.ollama_model, **kw)
+        if settings.llm_provider == "openai_compatible":
+            return OpenAICompatibleProvider(
+                settings.hosted_llm_base_url, settings.hosted_llm_api_key, settings.hosted_llm_model, **kw
+            )
+        if settings.llm_provider == "anthropic":
+            return AnthropicProvider(settings.anthropic_api_key, settings.anthropic_model, **kw)
+    except ProviderError as exc:
+        logger.warning("LLM provider %s unavailable (%s); using mock", settings.llm_provider, exc)
+    return MockProvider(**kw)

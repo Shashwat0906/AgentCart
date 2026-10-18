@@ -1,0 +1,51 @@
+# --- secrets & local env ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# --- python ---
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# --- node / frontend ---
+node_modules/
+frontend/dist/
+frontend/.vite/
+*.tsbuildinfo
+npm-debug.log*
+
+# --- test & eval artifacts ---
+frontend/test-results/
+frontend/playwright-report/
+frontend/blob-report/
+frontend/coverage/
+evaluation/reports/*
+!evaluation/reports/.gitkeep
+
+# --- local databases & user data ---
+*.db
+*.sqlite
+*.sqlite3
+pgdata/
+data/
+ollama-models/
+
+# --- OS / editor ---
+.DS_Store
+.idea/
+*.swp
+.vscode/*
+!.vscode/extensions.json
