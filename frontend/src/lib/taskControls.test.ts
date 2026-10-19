@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { isProgressing, newIdempotencyKey, pollInterval, rerunInput, taskControls, TASK_POLL_MS } from "./taskControls";
-import type { AgentTask, TaskStatus } from "./types";
+import type { ProductResearchTask, TaskStatus } from "./types";
 
-function t(status: TaskStatus, over: Partial<AgentTask> = {}): AgentTask {
+function t(status: TaskStatus, over: Partial<ProductResearchTask> = {}): ProductResearchTask {
   return {
     id: status, kind: "product_research", goal: "g", status, progress: 0, current_step: 0, total_steps: 4,
     input: { category: "laptops" }, result: null, error: null, cancel_requested: false, attempt: 0,
@@ -24,6 +24,12 @@ describe("taskControls", () => {
     ["cancelled", t("cancelled"), { cancel: false, resume: false, runAgain: true }],
   ])("%s", (_label, task, expected) => {
     expect(taskControls(task)).toEqual(expected);
+  });
+
+  it("never offers Run again for agent tasks (it re-sends a research form)", () => {
+    for (const status of ["succeeded", "failed", "cancelled"] as const) {
+      expect(taskControls({ ...t(status), kind: "shopping_agent" }).runAgain).toBe(false);
+    }
   });
 });
 

@@ -9,7 +9,7 @@ import { api } from "../lib/api";
 import { formatDate, formatINR } from "../lib/format";
 import { errorMessage, qk, useCategories } from "../lib/queries";
 import { isProgressing, newIdempotencyKey, pollInterval, rerunInput, taskControls, TASK_POLL_MS } from "../lib/taskControls";
-import type { AgentTask, ProductResearchInput, TaskStatus, TaskStepStatus } from "../lib/types";
+import type { AgentTask, ProductResearchInput, ProductResearchTask, TaskStatus, TaskStepStatus } from "../lib/types";
 
 const STATUS_LABEL: Record<TaskStatus, string> = {
   queued: "Queued",
@@ -207,6 +207,7 @@ function TaskCard({ task, onChange, onCreated }: { task: AgentTask; onChange: ()
   });
   const rerun = useMutation({
     mutationFn: () => {
+      if (task.kind !== "product_research") throw new Error("Only research tasks can be run again");
       rerunKey.current ??= newIdempotencyKey("rerun");
       return api.createTask(rerunInput(task.input), rerunKey.current);
     },
@@ -259,7 +260,7 @@ function TaskCard({ task, onChange, onCreated }: { task: AgentTask; onChange: ()
           {task.error.retryable ? " — this is temporary; you can resume." : ""}
         </p>
       )}
-      {task.result && <ResearchSummary task={task} />}
+      {task.kind === "product_research" && task.result && <ResearchSummary task={task} />}
 
       <div className="mt-4 flex flex-wrap gap-2">
         <button type="button" className="btn btn-sm" onClick={() => setOpen((v) => !v)} aria-expanded={open}>
@@ -305,7 +306,7 @@ function TaskCard({ task, onChange, onCreated }: { task: AgentTask; onChange: ()
   );
 }
 
-function ResearchSummary({ task }: { task: AgentTask }) {
+function ResearchSummary({ task }: { task: ProductResearchTask }) {
   const r = task.result;
   if (!r) return null;
   return (

@@ -32,7 +32,26 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.agents.tool_registry import RETRYABLE_CODES, ToolContext, ToolRegistry, build_read_only_registry
+from app.agents.planner import (
+    AgentGoal,
+    Clarify,
+    ConstraintReport,
+    Final,
+    Observation,
+    Planner,
+    PlannerState,
+    RuleBasedPlanner,
+    ToolCall,
+    check_decision,
+    derive_intent,
+)
+from app.agents.tool_registry import (
+    RETRYABLE_CODES,
+    TaskConstraints,
+    ToolContext,
+    ToolRegistry,
+    build_read_only_registry,
+)
 from app.core.config import Settings
 from app.core.errors import ConflictError, NotFoundError, RateLimited, ValidationFailed
 from app.models import AgentTask, AgentTaskStep
@@ -41,9 +60,13 @@ from app.services.specs import CATEGORY_LABELS, format_inr
 
 logger = logging.getLogger("agentcart.tasks")
 
-TaskKind = Literal["product_research"]
+TaskKind = Literal["product_research", "shopping_agent"]
 ACTIVE_STATUSES = ("queued", "running")
 SUMMARIZE = "summarize"  # built-in step, not a registry tool
+# Built-in, non-executable trace steps that end a planning loop.
+FINAL_STEP_TOOLS = ("final", "clarify")
+# Permissions offered to the planning loop. S3: read tools only (approval-gated proposals arrive in S4).
+LOOP_PERMISSIONS: frozenset[str] = frozenset({"read"})
 
 
 def _now() -> datetime:
@@ -80,7 +103,7 @@ class ProductResearchInput(BaseModel):
         return self
 
 
-INPUT_MODELS: dict[str, type[BaseModel]] = {"product_research": ProductResearchInput}
+INPUT_MODELS: dict[str, type[BaseModel]] = {"product_research": ProductResearchInput, "shopping_agent": AgentGoal}
 
 
 @dataclass(frozen=True)
@@ -98,10 +121,14 @@ def plan_steps(kind: str, inp: BaseModel) -> list[PlannedStep]:
             steps.append(PlannedStep("cart", "read_cart"))
         steps.append(PlannedStep("summarize", SUMMARIZE))
         return steps
+    if kind == "shopping_agent":
+        return []  # planned one decision at a time by the planning loop
     raise ValidationFailed("Unknown task kind")
 
 
 def goal_for(kind: str, inp: BaseModel) -> str:
+    if isinstance(inp, AgentGoal):
+        return f"Agent: {inp.goal}"[:300]
     assert isinstance(inp, ProductResearchInput)
     subject = CATEGORY_LABELS.get(inp.category or "", "").lower() or "products"
     parts = [f"Research {subject}"]
@@ -279,11 +306,15 @@ class TaskRunner:
         settings: Settings,
         registry_factory: Callable[[], ToolRegistry] = build_read_only_registry,
         sleep: Callable[[float], None] = time.sleep,
+        planner_factory: Callable[[], Planner] = RuleBasedPlanner,
+        clock: Callable[[], datetime] = _now,
     ) -> None:
         self.session_factory = session_factory
         self.settings = settings
         self.registry_factory = registry_factory
         self.sleep = sleep
+        self.planner_factory = planner_factory  # offline RuleBasedPlanner by default: no provider, no API key
+        self.clock = clock
 
     def run(self, task_id: str) -> str | None:
         """Returns the task's status when this runner let go of it, or None if it couldn't claim it."""
@@ -345,6 +376,8 @@ class TaskRunner:
 
     # -- the loop
     def _drive(self, db: Session, task: AgentTask, runner_id: str) -> str:
+        if task.kind == "shopping_agent":
+            return self._drive_loop(db, task, runner_id)
         registry = self.registry_factory()
         outputs = {s.name: s.output for s in task.steps if s.status == "succeeded"}
         for step in task.steps:
@@ -387,6 +420,7 @@ class TaskRunner:
         registry: ToolRegistry,
         outputs: dict[str, dict[str, Any] | None],
         runner_id: str,
+        constraints: TaskConstraints | None = None,
     ) -> StepOutcome:
         while True:
             step.status = "running"
@@ -394,7 +428,7 @@ class TaskRunner:
             step.started_at = step.started_at or _now()
             task.locked_until = self._lease_until()
             db.commit()
-            ok, output, error = self._execute(db, task, step, registry, outputs)
+            ok, output, error = self._execute(db, task, step, registry, outputs, constraints)
             if ok:
                 step.status, step.output, step.error = "succeeded", output, None
                 step.finished_at = _now()
@@ -419,10 +453,17 @@ class TaskRunner:
         step: AgentTaskStep,
         registry: ToolRegistry,
         outputs: dict[str, dict[str, Any] | None],
+        constraints: TaskConstraints | None = None,
     ) -> StepOutcome:
         if step.tool == SUMMARIZE:
             return True, _summarize(task.input, outputs), None
-        ctx = ToolContext(db=db, settings=self.settings, user_id=task.user_id, allowed_permissions=frozenset({"read"}))
+        ctx = ToolContext(
+            db=db,
+            settings=self.settings,
+            user_id=task.user_id,
+            allowed_permissions=frozenset({"read"}),
+            constraints=constraints,  # the task's own requirements; never from step arguments
+        )
         result = registry.execute(step.tool, step.args or {}, ctx)
         if result.ok:
             return True, result.data, None
@@ -436,6 +477,204 @@ class TaskRunner:
                 "retryable": result.error.code in RETRYABLE_CODES,
             },
         )
+
+    # -- the planning loop (shopping_agent)
+    def _drive_loop(self, db: Session, task: AgentTask, runner_id: str) -> str:
+        """Bounded plan → validate → persist → execute loop.
+
+        Each decision is validated (offered tool, grounded final, arguments against the tool's own schema)
+        and persisted as a step *before* it runs, so a resumed task finishes the decided step instead of
+        asking the planner again. Finished steps are never repeated. Hard constraints come only from the
+        deterministic intent, never from the planner.
+        """
+        s = self.settings
+        registry = self.registry_factory()
+        planner = self.planner_factory()
+        tools = [
+            spec.schema()
+            for name in registry.names()
+            if (spec := registry.get(name)) is not None and spec.permission in LOOP_PERMISSIONS
+        ]
+        goal = AgentGoal.model_validate(task.input)
+        intent, questions = derive_intent(goal, max_item_quantity=s.max_item_quantity)
+        constraints = TaskConstraints.from_intent(intent)
+        deadline = self.clock() + timedelta(seconds=s.task_deadline_seconds)
+        state: dict[str, Any] = {
+            "planner": planner.name,
+            "iterations": 0,
+            "tool_calls": 0,
+            "invalid_decisions": 0,
+            "runs": 0,
+            **(task.state or {}),
+        }
+        state["runs"] = int(state["runs"]) + 1
+        state["deadline_at"] = deadline.isoformat()  # per run; the counters are totals across runs
+        task.state = state
+        db.commit()
+
+        while True:
+            if not self._still_ours(db, task, runner_id):
+                logger.warning("task %s: lease lost, stopping", task.id)
+                return task.status
+            if task.cancel_requested:
+                _finish_cancelled(task)
+                db.commit()
+                return "cancelled"
+            pending = next((st for st in task.steps if st.status in ("queued", "running")), None)
+            if pending is None:
+                limit = self._loop_limit(task, deadline)
+                if limit is not None:
+                    return self._stop_loop(db, task, *limit)
+                observations = _observations(task.steps)
+                pstate = PlannerState(goal=goal, intent=intent, questions=questions, observations=observations)
+                self._count(task, "iterations")
+                try:
+                    decision = planner.decide(pstate, tools)
+                except Exception:
+                    # Never surface planner internals (or a provider's message) to the user.
+                    logger.exception("task %s: planner %s failed", task.id, planner.name)
+                    return self._stop_loop(db, task, "planner_error", "The planner failed to decide a next step", False)
+                problem = check_decision(decision, pstate, tools) or _argument_problem(decision, registry)
+                if problem is not None:
+                    self._record_rejected(db, task, decision, problem, planner.name)
+                    if self._state_int(task, "invalid_decisions") > s.task_max_invalid_decisions:
+                        return self._stop_loop(
+                            db, task, "invalid_decisions", "The planner kept proposing invalid steps", False
+                        )
+                    continue
+                if not isinstance(decision, ToolCall):
+                    return self._finish_loop(db, task, decision, observations, constraints, planner.name)
+                if self._state_int(task, "tool_calls") >= s.task_max_tool_calls:
+                    return self._stop_loop(
+                        db, task, "limit_reached", f"Stopped after {s.task_max_tool_calls} tool calls", False
+                    )
+                pending = self._append_step(db, task, decision, planner.name)
+            ok, _output, error = self._run_step_with_retries(
+                db, task, pending, registry, {}, runner_id, constraints=constraints
+            )
+            if not ok:
+                assert error is not None
+                return self._fail(db, task, pending, error)
+            self._loop_progress(task)
+            db.commit()
+
+    @staticmethod
+    def _state_int(task: AgentTask, key: str) -> int:
+        return int((task.state or {}).get(key, 0))
+
+    def _count(self, task: AgentTask, key: str) -> int:
+        state = dict(task.state or {})
+        state[key] = int(state.get(key, 0)) + 1
+        task.state = state  # reassigned so the JSON column is marked dirty
+        return int(state[key])
+
+    def _loop_limit(self, task: AgentTask, deadline: datetime) -> tuple[str, str, bool] | None:
+        s = self.settings
+        if self.clock() >= deadline:
+            # Time is per run: a resumed run gets a fresh budget and continues where this one stopped.
+            return "deadline_exceeded", f"Stopped after {s.task_deadline_seconds:g} seconds", True
+        if self._state_int(task, "iterations") >= s.task_max_iterations:
+            return "limit_reached", f"Stopped after {s.task_max_iterations} planning steps", False
+        return None
+
+    def _loop_progress(self, task: AgentTask) -> None:
+        task.current_step = sum(1 for st in task.steps if st.status in FINISHED_STEP_STATUSES)
+        task.total_steps = len(task.steps)
+        iterations = self._state_int(task, "iterations")
+        task.progress = min(99, round(100 * iterations / max(1, self.settings.task_max_iterations)))
+
+    def _decision_record(self, task: AgentTask, decision: ToolCall | Final | Clarify, planner: str) -> dict[str, Any]:
+        return {
+            "planner": planner,
+            "iteration": self._state_int(task, "iterations"),
+            "kind": decision.kind,
+            "rationale": decision.rationale if isinstance(decision, ToolCall) else "",
+        }
+
+    def _append_step(self, db: Session, task: AgentTask, decision: ToolCall, planner: str) -> AgentTaskStep:
+        """Persist the decision as a queued step and commit before executing it."""
+        step = AgentTaskStep(
+            position=len(task.steps),
+            name=decision.tool,
+            tool=decision.tool,
+            args=dict(decision.args),  # frozen: a resumed step replays exactly this call
+            status="queued",
+            attempts=0,
+            max_attempts=self.settings.task_step_max_attempts,
+            decision=self._decision_record(task, decision, planner),
+        )
+        task.steps.append(step)
+        task.total_steps = len(task.steps)
+        self._count(task, "tool_calls")
+        db.commit()
+        return step
+
+    def _record_rejected(
+        self, db: Session, task: AgentTask, decision: ToolCall | Final | Clarify, code: str, planner: str
+    ) -> None:
+        """Keep a refused decision in the trace as a finished (`skipped`) step: never executed, never resumed."""
+        self._count(task, "invalid_decisions")
+        label = decision.tool if isinstance(decision, ToolCall) else decision.kind
+        now = _now()
+        task.steps.append(
+            AgentTaskStep(
+                position=len(task.steps),
+                name=f"rejected:{label}"[:60],
+                tool=label[:60],
+                args=dict(decision.args) if isinstance(decision, ToolCall) else None,
+                status="skipped",
+                attempts=0,
+                max_attempts=1,
+                error={"code": code, "message": _REJECTION_MESSAGES.get(code, "Decision rejected"), "retryable": False},
+                decision={**self._decision_record(task, decision, planner), "rejected": True},
+                started_at=now,
+                finished_at=now,
+            )
+        )
+        task.total_steps = len(task.steps)
+        db.commit()
+
+    def _finish_loop(
+        self,
+        db: Session,
+        task: AgentTask,
+        decision: Final | Clarify,
+        observations: tuple[Observation, ...],
+        constraints: TaskConstraints,
+        planner: str,
+    ) -> str:
+        result = _compose_result(decision, observations, constraints)
+        now = _now()
+        task.steps.append(
+            AgentTaskStep(
+                position=len(task.steps),
+                name=decision.kind,
+                tool=decision.kind,
+                args=None,
+                status="succeeded",
+                attempts=0,
+                max_attempts=1,
+                output=result,
+                decision=self._decision_record(task, decision, planner),
+                started_at=now,
+                finished_at=now,
+            )
+        )
+        task.result = result
+        task.status, task.progress = "succeeded", 100
+        task.total_steps = task.current_step = len(task.steps)
+        task.locked_by = task.locked_until = None
+        task.finished_at = now
+        db.commit()
+        return "succeeded"
+
+    def _stop_loop(self, db: Session, task: AgentTask, code: str, message: str, retryable: bool) -> str:
+        task.status = "failed"
+        task.error = {"code": code, "message": message, "retryable": retryable}
+        task.locked_by = task.locked_until = None
+        task.finished_at = _now()
+        db.commit()
+        return "failed"
 
     def _advance(self, task: AgentTask, step: AgentTaskStep) -> None:
         task.current_step = step.position + 1
@@ -526,3 +765,79 @@ def _summarize(inp: dict[str, Any], outputs: dict[str, dict[str, Any] | None]) -
     cap = inp.get("max_price_inr")
     summary["all_within_budget"] = cap is None or all(p["price_inr"] <= cap for p in top)
     return summary
+
+
+# ------------------------------------------------------------------ planning-loop helpers (shopping_agent)
+_REJECTION_MESSAGES = {
+    "unknown_tool": "The planner chose a tool that isn't available to this task",
+    "invalid_arguments": "The planner's arguments don't match the tool's schema",
+    "ungrounded_final": "The planner named products that no constraint check passed",
+    "ungrounded_proposal": "The planner proposed a product that no constraint check passed",
+}
+
+
+def _argument_problem(decision: ToolCall | Final | Clarify, registry: ToolRegistry) -> str | None:
+    """Validate a tool call's arguments against the registered input schema before anything runs."""
+    if not isinstance(decision, ToolCall):
+        return None
+    spec = registry.get(decision.tool)
+    if spec is None:
+        return "unknown_tool"
+    try:
+        spec.input_model.model_validate(decision.args)
+    except ValidationError:
+        return "invalid_arguments"
+    return None
+
+
+def _observations(steps: list[AgentTaskStep]) -> tuple[Observation, ...]:
+    """What the planner has learned so far: executed tool steps only (not rejections or trace steps)."""
+    out: list[Observation] = []
+    for st in steps:
+        if st.tool in FINAL_STEP_TOOLS or (st.decision or {}).get("rejected"):
+            continue
+        if st.status == "succeeded":
+            out.append(Observation(tool=st.tool, args=dict(st.args or {}), ok=True, data=st.output))
+        elif st.status == "failed":
+            out.append(
+                Observation(tool=st.tool, args=dict(st.args or {}), ok=False, error_code=(st.error or {}).get("code"))
+            )
+    return tuple(out)
+
+
+def _latest_data(observations: tuple[Observation, ...], tool: str) -> dict[str, Any] | None:
+    return next((o.data for o in reversed(observations) if o.tool == tool and o.ok), None)
+
+
+def _compose_result(
+    decision: Final | Clarify, observations: tuple[Observation, ...], constraints: TaskConstraints
+) -> dict[str, Any]:
+    """The task result, built only from stored tool outputs: names, prices, ratings and stock are the
+    catalogue's, and the products are ones a constraint check passed (enforced by `check_decision`)."""
+    search = _latest_data(observations, "search_catalog") or {}
+    items = {int(p["id"]): p for p in search.get("items") or []}
+    report_data = _latest_data(observations, "evaluate_constraints")
+    report = ConstraintReport.model_validate(report_data) if report_data else None
+    result: dict[str, Any] = {
+        "type": "clarification",
+        "question": None,
+        "products": [],
+        "notes": "",
+        "requirements": report.constraints if report and report.constraints else constraints.labels(),
+        "candidates": len(items),
+        "eligible": sum(1 for r in report.results if r.passes) if report else 0,
+    }
+    if isinstance(decision, Clarify):
+        result["question"] = decision.question
+        return result
+    result["products"] = [
+        {k: items[pid][k] for k in ("id", "name", "brand", "category", "price_inr", "rating", "in_stock")}
+        for pid in decision.product_ids
+        if pid in items
+    ]
+    result["type"] = "recommendations" if result["products"] else "no_match"
+    result["notes"] = decision.notes
+    cart = _latest_data(observations, "read_cart")
+    if cart is not None:
+        result["cart"] = {"item_count": cart.get("item_count", 0), "total_inr": cart.get("total_inr", 0)}
+    return result

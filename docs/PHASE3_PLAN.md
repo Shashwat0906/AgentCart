@@ -1,6 +1,6 @@
 # Phase 3: AI planning loop with typed tool calling
 
-Status: **in progress** on branch `phase3/ai-planning-loop`. Baseline: `main` at `40ed7db` (backend 386 tests, frontend 54).
+Status: **in progress**, one PR per stage (D3). S1 and S2 merged in PR #14 (`ebda386`); S3 is on branch `phase3/s3-planning-loop`.
 
 ## Decisions (owner, 20 Oct 2026)
 
@@ -61,10 +61,26 @@ goal ─► RequestParser + validate_intent (deterministic intent and hard const
 |---|---|---|
 | S1 | ✅ Planner contracts and `RuleBasedPlanner` (`app/agents/planner.py`); 51 tests | `f96704f`, PR #14 |
 | S2 | ✅ `evaluate_constraints` read tool (registry), requirements taken from `ToolContext.constraints`; 40 tests | PR #14 |
-| S3–S6 | Not started | — |
+| S3 | ✅ Migration `0003` and the planning loop for `shopping_agent` tasks (`TaskRunner._drive_loop`), read tools only; 33 tests | PR (this branch) |
+| S4–S6 | Not started | — |
 
 ### Notes from S2
 
 * `evaluate_constraints` reuses `ranking.evaluate` (the same check that filters recommendations) and the existing violation wording via the new public `ranking.violation_message`. A test asserts it agrees with `filter_products` across the whole catalogue for nine goals.
 * The tool's arguments are product ids only. Category, hard constraints (budget included) and stock come from the task. An unknown attribute counts as a failure.
 * Known cosmetic limitation (existing wording, unchanged): an attribute the product's category doesn't define is shown by its raw name, e.g. `ram gb unknown (you required RAM ≥ 16 GB)` for a mouse.
+
+### Notes from S3
+
+* **Migration `0003`** contains only the S3 columns: `agent_tasks.state` and `agent_task_steps.decision`, both nullable JSON and with no index (never filtered on). `agent_actions.task_step_id` moves to S4 (it would be `0004`), so that S3 ships no unused column.
+* **Loop:**
+  * Each iteration: lease check → cancel check → finish any decided-but-unfinished step → limits → `planner.decide` → `check_decision` plus argument validation against the tool's own input model → persist the step (commit) → execute through the existing `_run_step_with_retries`.
+  * Hard constraints are passed to tools via `ToolContext.constraints`, built from the deterministic intent.
+* **Bounds:** iterations, tool calls, invalid decisions, and a per-run deadline (`TASK_*` settings). The deadline is the only retryable limit. Counters are totals across runs.
+* **Trace:**
+  * Rejected decisions are recorded as `skipped` steps with `decision.rejected = true` and are never executed or shown to the planner as observations.
+  * The final step is a built-in `final` or `clarify` step whose output is the grounded result.
+* **Frontend:** a compatibility guard only. `AgentTask` is a union on `kind`. The research summary and Run again appear only for `product_research`. The agent UI is S6.
+* **Mutation checks:** removing argument validation, `check_decision`, resume-without-replan, each limit, the in-loop cancel check, or the constraints hand-off makes at least one test fail. Two mutants survive, for reasons that make them harmless:
+  * the permission filter, which the registry already enforces;
+  * the commit after persisting a step, which `_run_step_with_retries` immediately repeats.

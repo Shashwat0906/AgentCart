@@ -50,6 +50,9 @@ class AgentTask(Base):
     locked_by: Mapped[str | None] = mapped_column(String(36), nullable=True, default=None)
     locked_until: Mapped[datetime | None] = mapped_column(nullable=True, default=None)
     attempt: Mapped[int] = mapped_column(Integer, default=0)  # number of runs started
+    # Planning-loop bookkeeping (shopping_agent tasks): planner name, iteration / tool-call / invalid-decision
+    # counters and the current run's deadline. NULL for fixed-plan tasks.
+    state: Mapped[dict[str, Any] | None] = mapped_column(JSONType, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
     started_at: Mapped[datetime | None] = mapped_column(nullable=True, default=None)
@@ -81,6 +84,9 @@ class AgentTaskStep(Base):
     max_attempts: Mapped[int] = mapped_column(Integer, default=3)
     output: Mapped[dict[str, Any] | None] = mapped_column(JSONType, nullable=True, default=None)
     error: Mapped[dict[str, Any] | None] = mapped_column(JSONType, nullable=True, default=None)
+    # Audit record of the planner decision that created this step (planner, iteration, rationale, and
+    # `rejected` + code when the decision was refused). NULL for fixed-plan steps.
+    decision: Mapped[dict[str, Any] | None] = mapped_column(JSONType, nullable=True, default=None)
     started_at: Mapped[datetime | None] = mapped_column(nullable=True, default=None)
     finished_at: Mapped[datetime | None] = mapped_column(nullable=True, default=None)
 

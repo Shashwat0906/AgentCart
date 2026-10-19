@@ -40,6 +40,7 @@ def task_view(task: AgentTask, settings: Settings, *, with_steps: bool = True) -
         "interrupted": task_service.is_interrupted(task),
         "stalled": task_service.is_stalled(task, stale_after_seconds=stale_after),
         "resumable": task_service.is_resumable(task, stale_after_seconds=stale_after) and not task.cancel_requested,
+        "state": task.state,
         "created_at": task.created_at,
         "updated_at": task.updated_at,
         "started_at": task.started_at,
@@ -57,6 +58,7 @@ def task_view(task: AgentTask, settings: Settings, *, with_steps: bool = True) -
                 "args": s.args,
                 "output": s.output,
                 "error": s.error,
+                "decision": s.decision,
                 "started_at": s.started_at,
                 "finished_at": s.finished_at,
             }

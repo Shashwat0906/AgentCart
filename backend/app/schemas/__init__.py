@@ -249,7 +249,7 @@ class OrderOut(Model):
 class TaskCreateIn(Model):
     """Clients choose a task kind and its typed input. Steps and tools are planned by the server."""
 
-    kind: Literal["product_research"]
+    kind: Literal["product_research", "shopping_agent"]
     input: dict[str, Any]
     idempotency_key: str | None = Field(default=None, pattern=r"^[A-Za-z0-9._:-]{8,80}$")
 
@@ -264,6 +264,7 @@ class TaskStepOut(Model):
     args: dict[str, Any] | None
     output: dict[str, Any] | None
     error: dict[str, Any] | None
+    decision: dict[str, Any] | None = None  # planner metadata (shopping_agent steps)
     started_at: datetime | None
     finished_at: datetime | None
 
@@ -284,6 +285,7 @@ class TaskOut(Model):
     interrupted: bool
     stalled: bool
     resumable: bool
+    state: dict[str, Any] | None = None  # planning-loop counters (shopping_agent)
     created_at: datetime
     updated_at: datetime
     started_at: datetime | None

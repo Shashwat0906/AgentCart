@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentTask } from "../lib/types";
+import type { ProductResearchTask, ShoppingAgentTask } from "../lib/types";
 import { mockFetch, renderWithProviders } from "../test/utils";
 import { TasksPage } from "./TasksPage";
 
@@ -15,7 +15,7 @@ beforeEach(() => {
 
 const CATEGORIES = [{ key: "laptops", label: "Laptops", product_count: 25, min_price_inr: 29990, max_price_inr: 149990, specs: [] }];
 
-function task(over: Partial<AgentTask> = {}): AgentTask {
+function task(over: Partial<ProductResearchTask> = {}): ProductResearchTask {
   return {
     id: "t1", kind: "product_research", goal: "Research laptops under ₹50,000", status: "succeeded",
     progress: 100, current_step: 4, total_steps: 4, input: { category: "laptops", max_price_inr: 50000 },
@@ -142,7 +142,7 @@ describe("TasksPage", () => {
 });
 
 describe("Task controls", () => {
-  const STATES: [string, Partial<AgentTask>, string[]][] = [
+  const STATES: [string, Partial<ProductResearchTask>, string[]][] = [
     ["queued", { status: "queued", progress: 0, result: null, finished_at: null }, ["Cancel"]],
     ["stalled", { status: "queued", stalled: true, resumable: true, result: null, finished_at: null }, ["Cancel", "Resume"]],
     ["running", { status: "running", progress: 25, result: null, finished_at: null }, ["Cancel"]],
@@ -271,4 +271,25 @@ describe("Task controls", () => {
     await new Promise((r) => setTimeout(r, 2000));
     expect(lists(dead)).toBe(1);
   }, 12_000);
+
+  it("shows agent tasks without the research summary or Run again", async () => {
+    const agent: ShoppingAgentTask = {
+      ...task(), id: "a1", kind: "shopping_agent", goal: "Agent: a wireless mouse under ₹3,000",
+      input: { goal: "a wireless mouse under ₹3,000" }, current_step: 5, total_steps: 5,
+      state: { planner: "rule_based", iterations: 5, tool_calls: 4, invalid_decisions: 0 },
+      result: {
+        type: "recommendations", question: null, notes: "2 of 6 candidates meet every requirement.",
+        products: [{ id: 41, name: "Logi M185", brand: "Logitech", category: "mice", price_inr: 799, rating: 4.3, in_stock: true }],
+        requirements: ["Mice", "under ₹3,000"], candidates: 6, eligible: 2,
+      },
+    };
+    mockFetch((url) => (url.endsWith("/tasks") ? { body: [agent] } : url.endsWith("/categories") ? { body: CATEGORIES } : undefined));
+    renderWithProviders(<TasksPage />);
+    const card = await screen.findByTestId("task-card");
+    expect(within(card).getByText("Agent: a wireless mouse under ₹3,000")).toBeInTheDocument();
+    expect(within(card).getByTestId("task-status")).toHaveTextContent("Done");
+    expect(within(card).queryByTestId("task-result")).not.toBeInTheDocument();
+    expect(within(card).queryByRole("button", { name: "Run again" })).not.toBeInTheDocument();
+    expect(within(card).getByRole("button", { name: "Show steps" })).toBeInTheDocument();
+  });
 });
