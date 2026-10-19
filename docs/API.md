@@ -99,6 +99,36 @@ Rules:
 * `kind` is one of `preferred_brand`, `avoided_brand`, `budget_max` (requires a category), `use_case` or `note`.
 * Values that look like emails, phone or card numbers, identity numbers, passwords, addresses, or health and financial details are rejected with 422.
 
+## Agent tasks 🔒 (persistent, read-only)
+
+A task is multi-step agent work that runs in the background and survives restarts. The server plans the steps; clients choose only the task `kind` and its typed `input`. Every step calls a **read-only** tool: tasks never change the cart, place orders or take payment.
+
+| Method | Path | Body / notes |
+|---|---|---|
+| POST | `/tasks` | `{kind: "product_research", input: {...}, idempotency_key?}`. 201 with the queued task, which then runs in the background. Re-sending the same `idempotency_key` returns the original task (200); reusing it for different input is 409. 429 when the caller already has `TASK_MAX_ACTIVE_PER_USER` queued or running tasks. Rate-limited. |
+| GET | `/tasks` | The caller's tasks, newest first (up to 50), without steps |
+| GET | `/tasks/{id}` | One task with its steps |
+| POST | `/tasks/{id}/cancel` | A queued or interrupted task is cancelled at once; a running one stops at the next step boundary (`cancel_requested: true`). 409 if already finished. |
+| POST | `/tasks/{id}/resume` | Re-runs only the unfinished steps of a queued, interrupted, or retryably failed task; finished steps are never repeated. 409 otherwise. |
+
+`product_research` input (strict: unknown fields and type coercion are rejected):
+
+| Field | Type | Default |
+|---|---|---|
+| `query` | string, 1–120 | — |
+| `category` | one of the catalogue categories | — (a `query` or a `category` is required) |
+| `max_price_inr` | integer ≥ 1 | — |
+| `min_rating` | number 0–5 | — |
+| `in_stock` | boolean | `true` |
+| `compare_top` | integer 2–4 | `3` |
+| `include_cart` | boolean | `true` |
+
+Steps: `search` (`search_catalog`) → `compare` (`compare_products`; skipped when fewer than 2 products match) → `cart` (`read_cart`, optional) → `summarize` (built in, deterministic). The result has `matches`, `top`, `best` (lowest price / best rated), `cart` and `all_within_budget`.
+
+Task fields: `status` (`queued` · `running` · `succeeded` · `failed` · `cancelled`), `progress` (0–100), `current_step`, `total_steps`, `result`, `error` (`{code, message, retryable, step}`), `cancel_requested`, `attempt` (runs started), `interrupted` (running but its runner's lease expired), `resumable`, and timestamps. Step fields: `status` (`queued` · `running` · `succeeded` · `failed` · `skipped` · `cancelled`), `attempts`, `max_attempts`, `args` (frozen when the step first runs), `output`, `error`.
+
+Recovery: transient tool failures (`temporarily_unavailable`) are retried with exponential backoff up to `TASK_STEP_MAX_ATTEMPTS`; if they persist the task fails with `retryable: true` and can be resumed. Permanent failures (`invalid_input`, `not_found`, `unknown_tool`, …) are not retryable. Other users' tasks are 404.
+
 ## Checkout 🔒 (demo; no payment)
 
 | Method | Path | Body | Notes |

@@ -15,6 +15,8 @@ export const qk = {
   preferences: ["preferences"] as const,
   orders: ["orders"] as const,
   config: ["config"] as const,
+  tasks: ["tasks"] as const,
+  task: (id: string) => ["task", id] as const,
 };
 
 export function useProducts(q: ProductQuery) {

@@ -243,3 +243,48 @@ class OrderOut(Model):
     total_inr: int
     created_at: datetime
     items: list[OrderItemOut]
+
+
+# ------------------------------------------------------------------ persistent agent tasks
+class TaskCreateIn(Model):
+    """Clients choose a task kind and its typed input. Steps and tools are planned by the server."""
+
+    kind: Literal["product_research"]
+    input: dict[str, Any]
+    idempotency_key: str | None = Field(default=None, pattern=r"^[A-Za-z0-9._:-]{8,80}$")
+
+
+class TaskStepOut(Model):
+    position: int
+    name: str
+    tool: str
+    status: str
+    attempts: int
+    max_attempts: int
+    args: dict[str, Any] | None
+    output: dict[str, Any] | None
+    error: dict[str, Any] | None
+    started_at: datetime | None
+    finished_at: datetime | None
+
+
+class TaskOut(Model):
+    id: str
+    kind: str
+    goal: str
+    status: str
+    progress: int
+    current_step: int
+    total_steps: int
+    input: dict[str, Any]
+    result: dict[str, Any] | None
+    error: dict[str, Any] | None
+    cancel_requested: bool
+    attempt: int
+    interrupted: bool
+    resumable: bool
+    created_at: datetime
+    updated_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+    steps: list[TaskStepOut] | None = None

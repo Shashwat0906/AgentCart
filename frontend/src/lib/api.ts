@@ -1,5 +1,6 @@
 import type {
   AgentAction,
+  AgentTask,
   ApprovalResponse,
   Cart,
   Category,
@@ -12,6 +13,7 @@ import type {
   PreferenceKind,
   ProductDetail,
   ProductPage,
+  ProductResearchInput,
   PublicConfig,
   Quote,
   TokenResponse,
@@ -150,4 +152,12 @@ export const api = {
     request<Order>("/checkout/confirm", { method: "POST", body: { quote_id, confirm: true, idempotency_key } }),
   orders: () => request<Order[]>("/orders"),
   order: (id: number) => request<Order>(`/orders/${id}`),
+
+  // persistent agent tasks (read-only research; nothing is bought or added to the cart)
+  tasks: () => request<AgentTask[]>("/tasks"),
+  task: (id: string) => request<AgentTask>(`/tasks/${id}`),
+  createTask: (input: ProductResearchInput, idempotency_key?: string) =>
+    request<AgentTask>("/tasks", { method: "POST", body: { kind: "product_research", input, idempotency_key } }),
+  cancelTask: (id: string) => request<AgentTask>(`/tasks/${id}/cancel`, { method: "POST" }),
+  resumeTask: (id: string) => request<AgentTask>(`/tasks/${id}/resume`, { method: "POST" }),
 };

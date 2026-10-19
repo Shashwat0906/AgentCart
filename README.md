@@ -14,7 +14,7 @@ Runs fully locally with **no paid API keys**: the default AI path is a determini
 
 ## Contents
 
-[Features](#features) · [Architecture](#architecture) · [Quick start (Docker)](#quick-start-docker) · [Local development (macOS)](#local-development-macos) · [Environment variables](#environment-variables) · [Local AI models](#local-ai-models-optional) · [Testing & evaluation](#testing--evaluation) · [Verification results](#verification-results) · [Deployment](#deployment) · [Publishing to GitHub](#publishing-to-github) · [Limitations](#limitations--future-work)
+[Features](#features) · [Architecture](#architecture) · [Quick start (Docker)](#quick-start-docker) · [Local development (macOS)](#local-development-macos) · [Environment variables](#environment-variables) · [Local AI models](#local-ai-models-optional) · [Testing & evaluation](#testing--evaluation) · [Verification results](#verification-results) · [Deployment](#deployment) · [Contributing](#contributing-workflow) · [Limitations](#limitations--future-work)
 
 ## Features
 
@@ -25,10 +25,11 @@ Runs fully locally with **no paid API keys**: the default AI path is a determini
 | **Grounded recommendations** | Hard constraints are applied before ranking. Deterministic scores for budget fit, spec match, rating (Bayesian-smoothed) and preferences, with configurable weights (env vars or UI sliders). Every product, price and spec comes from the database. No matches → the reason is explained and clearly labelled alternatives are offered. |
 | **Safety** | User messages and product descriptions are treated as untrusted. Prompt injection is flagged and has no privileged path to act on. LLM output is grounding-checked. Only two action types exist (`add_to_cart`, `save_preference`), and both need explicit approval. |
 | **Memory** | Short-term conversation context ("cheaper ones", "add the second one", "compare the top three") is kept separate from long-term preferences. Preferences are saved only on approval, can be viewed, edited and deleted, and refuse sensitive data. |
+| **Persistent agent tasks** | Background, multi-step research tasks (search → compare → read cart → summarise) stored in PostgreSQL with per-step status, progress, results and errors. Leased execution, safe resume after a crash or deploy without repeating finished steps, retries with exponential backoff for transient failures, cancellation, idempotent creation and per-user limits. Read-only: tasks never change the cart or buy anything. |
 | **Cart & checkout** | Server-computed totals, strict quantity validation, row-locked stock checks (no overselling), approval-time price/stock revalidation, quote → explicit confirmation → idempotent demo order. **No real payments.** |
 | **Auth** | Argon2id password hashing, JWT bearer tokens, per-user authorization on every resource, CORS from env, rate limits, structured errors. |
-| **Frontend** | React 19 + TypeScript. Home, catalogue, product, compare, assistant (with conversation history, ranking sliders, "how I got here" trace), cart, checkout, orders and preferences. Loading, empty and error states; responsive; accessible (labels, focus states, live regions, reduced-motion support). |
-| **Quality** | 181 backend tests, 30 frontend unit tests, 7 Playwright E2E tests, and an 81-scenario evaluation suite with metrics. CI for lint, types, tests on PostgreSQL, evaluation thresholds, audits, E2E, Docker builds and secret scanning. |
+| **Frontend** | React 19 + TypeScript. Home, catalogue, product, compare, assistant (with conversation history, ranking sliders, "how I got here" trace), research tasks (live progress, steps, cancel and resume), cart, checkout, orders and preferences. Loading, empty and error states; responsive; accessible (labels, focus states, live regions, reduced-motion support). |
+| **Quality** | 364 backend tests, 35 frontend unit tests, 9 Playwright E2E tests, and an 81-scenario evaluation suite with metrics. CI for lint, types, tests on PostgreSQL, evaluation thresholds, audits, E2E, Docker builds and secret scanning. |
 
 ## Architecture
 
@@ -145,7 +146,7 @@ Whatever model you use, it cannot add hard constraints, invent budgets or produc
 ## Testing & evaluation
 
 ```bash
-cd backend && .venv/bin/pytest                    # 181 tests, in-memory SQLite (~5 s)
+cd backend && .venv/bin/pytest                    # 364 tests, in-memory SQLite (~15 s)
 TEST_DATABASE_URL=postgresql+psycopg://agentcart:<pw>@localhost:5433/agentcart_test .venv/bin/pytest   # same suite on Postgres
 cd backend && .venv/bin/ruff check . && .venv/bin/ruff format --check . && .venv/bin/mypy app
 backend/.venv/bin/python evaluation/run_eval.py --strict   # 81 scenarios → evaluation/reports/latest.md
@@ -167,27 +168,25 @@ It measures constraint satisfaction against independent ground truth, top-1/top-
 
 ## Verification results
 
-All results below were produced on the development machine (macOS, Python 3.14.4, Node 22.23, Docker 28.3) on 18 Oct 2026.
+Results from the Phase 2 branch on the development machine (macOS, Python 3.14.4, Node 22.23, Docker 28.3), 19 Oct 2026. CI runs the same checks on every pull request.
 
 | Check | Result |
 |---|---|
-| Backend tests (SQLite) | **181 passed** |
-| Backend tests (PostgreSQL 16) | **181 passed**; line coverage **92%** |
-| Alembic migration upgrade → downgrade → upgrade → downgrade (PostgreSQL) | ✅ |
-| ruff lint + format, mypy (47 source files) | ✅ no issues |
-| Evaluation suite | **81/81 scenarios passed**. Constraint satisfaction 100% (92 checks); top-1 100% (12 cases); top-3 100% (5 cases); invalid-action rate 0%; tool-call success 100% (81 calls); grounded cards 100% (172) |
-| Frontend unit tests (Vitest) | **30 passed** |
+| Backend tests (SQLite) | **364 passed**; line coverage **93%** |
+| Backend tests (PostgreSQL 16) | **364 passed** |
+| Alembic `0001 → 0002` on a database with existing data; downgrade and re-upgrade; `alembic check` (PostgreSQL and SQLite) | ✅ data preserved, no model/migration drift |
+| ruff lint + format, mypy (51 source files) | ✅ no issues |
+| Evaluation suite | **81/81 scenarios passed** |
+| Frontend unit tests (Vitest) | **35 passed** |
 | ESLint, TypeScript (`tsc -b`) | ✅ no errors or warnings |
-| Production build | ✅ JS 393 KB (122 KB gzip), CSS 38 KB (8.1 KB gzip) |
-| Playwright E2E (desktop + mobile) against Vite dev + local API | **7 passed** |
-| Playwright E2E against the **Docker Compose** stack (nginx + CSP) | **7 passed** |
-| `docker compose up --build`: db, backend, frontend | ✅ all healthy; backend runs as non-root `app` user |
-| `pip-audit` (runtime deps), `npm audit` (all deps) | ✅ 0 known vulnerabilities |
+| Production build | ✅ JS 402 KB (124 KB gzip) |
+| Playwright E2E (desktop + mobile) against Vite dev + local API | **9 passed** |
+| Docker image builds (backend, frontend) | ✅ |
+| `pip-audit` (runtime deps), `npm audit` (all deps), gitleaks (all branches) | ✅ 0 known vulnerabilities, no leaks |
 
 **Not verified:**
-* The GitHub Actions workflow has not run yet (there is no remote). Its steps were each run locally.
 * Real LLM providers (see above).
-* Deployments (none performed).
+* Live deployment status: check the Render and Vercel dashboards.
 
 The evaluation is self-authored; see the caveats in [`evaluation/README.md`](evaluation/README.md).
 
@@ -195,21 +194,18 @@ The evaluation is self-authored; see the caveats in [`evaluation/README.md`](eva
 
 Configuration is ready for **Vercel** (frontend), **Render** (API container, `render.yaml`) and **Neon** (PostgreSQL). [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) has step-by-step instructions and free-tier caveats: Render free services sleep after inactivity and cold-start slowly, Neon suspends idle compute, and Vercel Hobby is non-commercial only.
 
-**Nothing has been deployed**, and no external resources or accounts have been created.
+Deployments are managed by the repository owner; schema changes are applied automatically at container start (`alembic upgrade head`). See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for migration notes.
 
-## Publishing to GitHub
+## Contributing workflow
 
-The repository is local only (no remote). When you are ready:
+The repository is on GitHub with branch protection on `main`. Work on a feature branch and open a pull request; CI (lint, types, tests on PostgreSQL, evaluation, audits, E2E, Docker builds, secret scan) must pass before merging. Secret scanning and push protection are enabled.
 
 ```bash
-git status && git log --format='%h %an <%ae> %s'   # confirm the author identity on every commit
-git diff --cached                                  # inspect anything staged
+git switch -c phaseN/short-name
+make lint && make test                              # re-run checks locally
 git ls-files | grep -E '\.env$|secret|\.pem$'      # must print nothing (only .env.example is tracked)
-make lint && make test                             # re-run checks
-gh repo create <name> --private --source . --push  # or create the repo on github.com and `git remote add` + `git push -u origin main`
+git push -u origin phaseN/short-name && gh pr create
 ```
-
-After the first push, check the **CI** workflow run, and enable Dependabot alerts and secret scanning in the repository settings.
 
 ## Limitations & future work
 

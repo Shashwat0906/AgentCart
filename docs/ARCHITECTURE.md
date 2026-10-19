@@ -72,6 +72,29 @@ flowchart TD
 
 When the user approves, the server re-validates live data rather than trusting what the agent saw.
 
+## Persistent agent tasks
+
+```mermaid
+stateDiagram-v2
+  [*] --> queued: POST /tasks (server plans steps)
+  queued --> running: runner claims lease
+  running --> running: step succeeded / skipped (committed)
+  running --> succeeded: all steps done
+  running --> failed: permanent error, or retries exhausted (retryable)
+  running --> cancelled: cancel requested (checked at step boundaries)
+  queued --> cancelled: cancel
+  running --> queued: resume after lease expired (interrupted)
+  failed --> queued: resume (retryable only)
+  succeeded --> [*]
+  cancelled --> [*]
+```
+
+* **Persistence.** `agent_tasks` holds status, progress, input, result, error and the lease; `agent_task_steps` holds each step's status, frozen arguments, output, error and attempt count. Every transition is committed, so a crash loses at most the step in flight.
+* **Leases.** A runner claims a task under a row lock (`locked_by`, `locked_until`) and renews the lease at every step. An expired lease marks the task *interrupted*; a runner that finds it has lost its lease stops without writing.
+* **No duplicated work.** Finished steps are skipped on resume and their stored output is reused; a step's arguments are frozen when it first starts.
+* **Retries.** Transient failures are retried with exponential backoff; permanent failures fail the task immediately.
+* **Approval gating.** Steps come only from the server-side planner and run read-only tools via the typed tool registry. Future cart or checkout steps must go through the existing pending-action approval flow.
+
 ## Ranking
 
 All ranking is plain Python in `backend/app/services/ranking.py`:
@@ -97,6 +120,8 @@ erDiagram
   users ||--o{ conversations : has
   conversations ||--o{ messages : contains
   users ||--o{ agent_actions : "must approve"
+  users ||--o{ agent_tasks : owns
+  agent_tasks ||--|{ agent_task_steps : runs
   conversations ||--o{ agent_actions : proposes
   users ||--o{ preferences : saves
   users ||--o{ checkout_quotes : requests

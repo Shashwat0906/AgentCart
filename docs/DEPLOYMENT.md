@@ -82,7 +82,9 @@ Any small VM with Docker can run the same stack as local development:
 
 ## Operations notes
 
-* **Migrations** run automatically at container start (`alembic upgrade head`). Roll back with `alembic downgrade -1` from a shell in the container.
+* **Migrations** run automatically at container start (`alembic upgrade head`). Roll back with `alembic downgrade -1` from a shell in the container (on Render's free plan, which has no shell, run it locally against the database URL).
+* **Migration `0002` (agent tasks)** is additive: it creates `agent_tasks` and `agent_task_steps` and changes no existing table, so it is backward compatible and safe to apply to a live database. Downgrading drops those two tables and the task history in them.
+* **Agent tasks** run in the API process after the request returns. A restart or deploy interrupts running tasks; their lease expires after `TASK_LEASE_SECONDS` and users can resume them from the Tasks page. No worker service is needed.
 * **Re-seeding** with `python -m app.seed --reset` restores demo prices and stock after demo orders.
 * **Logs** go to stdout. Unhandled exceptions are logged with stack traces server-side only.
 * **Scaling** beyond one instance needs a shared rate-limit store (see `docs/SECURITY.md`).

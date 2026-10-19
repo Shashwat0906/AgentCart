@@ -58,6 +58,14 @@ Status legend: `[ ]` todo · `[x]` done and verified
 - [x] Full stack verified locally via Docker Compose
 - [x] README with exact commands + actual results
 
+## Agentic commerce upgrade
+- [x] Phase 1: typed tool registry for read-only tools (search, product, compare, cart)
+- [x] Phase 2: persistent agent tasks (migration `0002`, leased runner, retries, cancel, resume, Tasks page)
+- [ ] Phase 3: planning loop with LLM tool calling
+- [ ] Phase 4: approval-gated cart management actions
+- [ ] Phase 5: approval-gated checkout
+- [ ] Phase 6: broader error recovery (substitutes, price-change re-proposals)
+
 ## Not done (needs owner approval or external resources)
 - [ ] Push to GitHub and observe the first CI run
 - [ ] Deploy to Vercel / Render / Neon (configs prepared, nothing created)
