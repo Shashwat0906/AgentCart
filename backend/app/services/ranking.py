@@ -338,6 +338,11 @@ def _violation(c: Constraint, p: ProductLike) -> tuple[str, float]:
     return f"{label}: {describe(p, c.attribute)} (you asked {c.label or c.attribute})", 1.0
 
 
+def violation_message(c: Constraint, p: ProductLike) -> str:
+    """How `p` misses hard constraint `c`, in the same words alternatives use ("₹4,990 over your budget")."""
+    return _violation(c, p)[0]
+
+
 def find_alternatives(
     products: Sequence[ProductLike],
     intent: ShoppingIntent,

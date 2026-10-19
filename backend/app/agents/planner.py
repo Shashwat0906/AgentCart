@@ -136,9 +136,12 @@ class ConstraintResult(_Strict):
 
 
 class ConstraintReport(_Strict):
-    """Output of the `evaluate_constraints` tool (S2): one result per requested product, in order."""
+    """Output of the `evaluate_constraints` tool (S2): one result per requested product, in order.
+
+    `constraints` names every requirement that was checked (from the task, never from tool arguments)."""
 
     results: list[ConstraintResult]
+    constraints: list[str] = Field(default_factory=list)
 
 
 @dataclass(frozen=True)

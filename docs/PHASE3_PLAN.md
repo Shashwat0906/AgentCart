@@ -59,5 +59,12 @@ goal ─► RequestParser + validate_intent (deterministic intent and hard const
 
 | Stage | Status | Commit / PR |
 |---|---|---|
-| S1 | ✅ Planner contracts and `RuleBasedPlanner` (`app/agents/planner.py`); 51 tests | this PR |
-| S2–S6 | Not started | — |
+| S1 | ✅ Planner contracts and `RuleBasedPlanner` (`app/agents/planner.py`); 51 tests | `f96704f`, PR #14 |
+| S2 | ✅ `evaluate_constraints` read tool (registry), requirements taken from `ToolContext.constraints`; 40 tests | PR #14 |
+| S3–S6 | Not started | — |
+
+### Notes from S2
+
+* `evaluate_constraints` reuses `ranking.evaluate` (the same check that filters recommendations) and the existing violation wording via the new public `ranking.violation_message`. A test asserts it agrees with `filter_products` across the whole catalogue for nine goals.
+* The tool's arguments are product ids only. Category, hard constraints (budget included) and stock come from the task. An unknown attribute counts as a failure.
+* Known cosmetic limitation (existing wording, unchanged): an attribute the product's category doesn't define is shown by its raw name, e.g. `ram gb unknown (you required RAM ≥ 16 GB)` for a mouse.

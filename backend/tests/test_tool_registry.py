@@ -24,7 +24,7 @@ from app.models import Base, Cart, Product
 from app.schemas import ProductPage
 from tests.conftest import register
 
-READ_TOOLS = ["compare_products", "get_product", "read_cart", "search_catalog"]
+READ_TOOLS = ["compare_products", "evaluate_constraints", "get_product", "read_cart", "search_catalog"]
 
 
 @pytest.fixture()
@@ -45,7 +45,7 @@ def row_counts(db: Session) -> dict[str, int]:
 
 
 # ------------------------------------------------------------------ registry and schemas
-def test_registry_exposes_exactly_the_four_read_only_tools(registry: ToolRegistry) -> None:
+def test_registry_exposes_exactly_the_read_only_tools(registry: ToolRegistry) -> None:
     assert registry.names() == READ_TOOLS
     assert all(registry.get(n).permission == "read" for n in READ_TOOLS)  # type: ignore[union-attr]
     assert [n for n in READ_TOOLS if registry.get(n).requires_user] == ["read_cart"]  # type: ignore[union-attr]
