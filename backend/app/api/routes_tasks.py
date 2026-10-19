@@ -22,7 +22,8 @@ def get_task_runner(settings: Settings = Depends(get_settings)) -> task_service.
     return task_service.TaskRunner(get_sessionmaker(), settings)
 
 
-def task_view(task: AgentTask, *, with_steps: bool = True) -> dict[str, Any]:
+def task_view(task: AgentTask, settings: Settings, *, with_steps: bool = True) -> dict[str, Any]:
+    stale_after = settings.task_lease_seconds
     out: dict[str, Any] = {
         "id": task.id,
         "kind": task.kind,
@@ -37,7 +38,8 @@ def task_view(task: AgentTask, *, with_steps: bool = True) -> dict[str, Any]:
         "cancel_requested": task.cancel_requested,
         "attempt": task.attempt,
         "interrupted": task_service.is_interrupted(task),
-        "resumable": task_service.is_resumable(task) and not task.cancel_requested,
+        "stalled": task_service.is_stalled(task, stale_after_seconds=stale_after),
+        "resumable": task_service.is_resumable(task, stale_after_seconds=stale_after) and not task.cancel_requested,
         "created_at": task.created_at,
         "updated_at": task.updated_at,
         "started_at": task.started_at,
@@ -78,22 +80,34 @@ def create_task(
         background.add_task(runner.run, task.id)  # runs after the response is sent
     else:
         response.status_code = 200  # same idempotency key: the original task, not a new one
-    return task_view(task)
+    return task_view(task, settings)
 
 
 @router.get("/tasks", response_model=list[TaskOut])
-def list_tasks(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> list[dict[str, Any]]:
-    return [task_view(t, with_steps=False) for t in task_service.list_tasks(db, user.id)]
+def list_tasks(
+    user: User = Depends(get_current_user), db: Session = Depends(get_db), settings: Settings = Depends(get_settings)
+) -> list[dict[str, Any]]:
+    return [task_view(t, settings, with_steps=False) for t in task_service.list_tasks(db, user.id)]
 
 
 @router.get("/tasks/{task_id}", response_model=TaskOut)
-def get_task(task_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
-    return task_view(task_service.get_owned(db, user.id, task_id))
+def get_task(
+    task_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, Any]:
+    return task_view(task_service.get_owned(db, user.id, task_id), settings)
 
 
 @router.post("/tasks/{task_id}/cancel", response_model=TaskOut, dependencies=[Depends(write_limit)])
-def cancel_task(task_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
-    return task_view(task_service.request_cancel(db, user.id, task_id))
+def cancel_task(
+    task_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, Any]:
+    return task_view(task_service.request_cancel(db, user.id, task_id), settings)
 
 
 @router.post("/tasks/{task_id}/resume", response_model=TaskOut, dependencies=[Depends(write_limit)])
@@ -102,8 +116,9 @@ def resume_task(
     background: BackgroundTasks,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
     runner: task_service.TaskRunner = Depends(get_task_runner),
 ) -> dict[str, Any]:
-    task = task_service.prepare_resume(db, user.id, task_id)
+    task = task_service.prepare_resume(db, user.id, task_id, settings)
     background.add_task(runner.run, task.id)
-    return task_view(task)
+    return task_view(task, settings)

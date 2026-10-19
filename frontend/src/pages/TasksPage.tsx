@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ListChecks } from "lucide-react";
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useRef, useState } from "react";
 import { Link } from "react-router";
 import { Container } from "../components/Layout";
 import { EmptyState, ErrorState, PageHeader, Spinner } from "../components/ui";
@@ -8,9 +8,9 @@ import { useToast } from "../components/toastContext";
 import { api } from "../lib/api";
 import { formatDate, formatINR } from "../lib/format";
 import { errorMessage, qk, useCategories } from "../lib/queries";
+import { isProgressing, newIdempotencyKey, pollInterval, rerunInput, taskControls, TASK_POLL_MS } from "../lib/taskControls";
 import type { AgentTask, ProductResearchInput, TaskStatus, TaskStepStatus } from "../lib/types";
 
-const ACTIVE: TaskStatus[] = ["queued", "running"];
 const STATUS_LABEL: Record<TaskStatus, string> = {
   queued: "Queued",
   running: "Running",
@@ -42,21 +42,22 @@ const STEP_ICON: Record<TaskStepStatus, string> = {
   cancelled: "⊘",
 };
 
-function newKey(): string {
-  return `research-${typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : String(Date.now())}`;
-}
-
 export function TasksPage() {
   const qc = useQueryClient();
   const tasks = useQuery({
     queryKey: qk.tasks,
     queryFn: api.tasks,
-    // Poll only while something is in progress.
-    refetchInterval: (q) => (q.state.data?.some((t) => ACTIVE.includes(t.status)) ? 1500 : false),
+    // Poll only while a task is actually progressing (not interrupted or stalled ones).
+    refetchInterval: (q) => pollInterval(q.state.data),
   });
   const refresh = () => {
     qc.invalidateQueries({ queryKey: qk.tasks });
     qc.invalidateQueries({ queryKey: ["task"] });
+  };
+  // A newly created task appears at once (so polling starts at once), before the list refetches.
+  const added = (created: AgentTask) => {
+    qc.setQueryData<AgentTask[]>(qk.tasks, (old) => (old && !old.some((x) => x.id === created.id) ? [created, ...old] : old));
+    refresh();
   };
   return (
     <Container className="max-w-4xl">
@@ -65,7 +66,7 @@ export function TasksPage() {
         The agent searches, compares and summarises in the background, saving every step so an interrupted task
         can be resumed. Tasks only read: nothing is added to your cart or bought.
       </p>
-      <NewTaskForm onCreated={refresh} />
+      <NewTaskForm onCreated={added} />
       <section aria-labelledby="task-list" className="mt-8">
         <h2 id="task-list" className="mb-3 font-semibold">Your tasks</h2>
         {tasks.isLoading ? (
@@ -77,7 +78,7 @@ export function TasksPage() {
         ) : (
           <ul className="space-y-4">
             {tasks.data.map((t) => (
-              <TaskCard key={t.id} task={t} onChange={refresh} />
+              <TaskCard key={t.id} task={t} onChange={refresh} onCreated={added} />
             ))}
           </ul>
         )}
@@ -86,7 +87,7 @@ export function TasksPage() {
   );
 }
 
-function NewTaskForm({ onCreated }: { onCreated: () => void }) {
+function NewTaskForm({ onCreated }: { onCreated: (task: AgentTask) => void }) {
   const toast = useToast();
   const categories = useCategories();
   const [category, setCategory] = useState("");
@@ -94,17 +95,22 @@ function NewTaskForm({ onCreated }: { onCreated: () => void }) {
   const [maxPrice, setMaxPrice] = useState("");
   const [includeCart, setIncludeCart] = useState(true);
   const [formError, setFormError] = useState<string | null>(null);
+  const inFlight = useRef(false);
   const create = useMutation({
-    mutationFn: (input: ProductResearchInput) => api.createTask(input, newKey()),
-    onSuccess: () => {
+    mutationFn: (input: ProductResearchInput) => api.createTask(input, newIdempotencyKey("research")),
+    onSuccess: (task) => {
       toast("Research task started");
-      onCreated();
+      onCreated(task);
     },
     onError: (e) => toast(errorMessage(e), "error"),
+    onSettled: () => {
+      inFlight.current = false;
+    },
   });
 
   function submit(e: FormEvent) {
     e.preventDefault();
+    if (inFlight.current) return; // a second click before React re-renders the disabled button
     const q = query.trim();
     if (!category && !q) {
       setFormError("Choose a category or enter what you're looking for.");
@@ -116,6 +122,7 @@ function NewTaskForm({ onCreated }: { onCreated: () => void }) {
       return;
     }
     setFormError(null);
+    inFlight.current = true;
     create.mutate({
       ...(category ? { category } : {}),
       ...(q ? { query: q } : {}),
@@ -157,23 +164,37 @@ function NewTaskForm({ onCreated }: { onCreated: () => void }) {
   );
 }
 
-function TaskCard({ task, onChange }: { task: AgentTask; onChange: () => void }) {
+function TaskCard({ task, onChange, onCreated }: { task: AgentTask; onChange: () => void; onCreated: (task: AgentTask) => void }) {
   const toast = useToast();
   const [open, setOpen] = useState(false);
-  const active = ACTIVE.includes(task.status);
+  const progressing = isProgressing(task);
+  const controls = taskControls(task);
   const detail = useQuery({
     queryKey: qk.task(task.id),
     queryFn: () => api.task(task.id),
     enabled: open,
-    refetchInterval: open && active ? 1500 : false,
+    refetchInterval: open && progressing ? TASK_POLL_MS : false,
   });
+  // One action at a time per card. The ref blocks a second click that lands before React re-renders
+  // the disabled buttons; the server still re-validates every action.
+  const inFlight = useRef(false);
+  // "Run again" keeps its key until it succeeds, so retrying after a network error can't create a duplicate.
+  const rerunKey = useRef<string | null>(null);
+  const failed = (e: unknown) => {
+    toast(errorMessage(e), "error");
+    onChange(); // e.g. 409: the task changed state elsewhere; show its current state
+  };
+  const settled = () => {
+    inFlight.current = false;
+  };
   const cancel = useMutation({
     mutationFn: () => api.cancelTask(task.id),
     onSuccess: (t) => {
       toast(t.status === "cancelled" ? "Task cancelled" : "Cancelling after the current step");
       onChange();
     },
-    onError: (e) => toast(errorMessage(e), "error"),
+    onError: failed,
+    onSettled: settled,
   });
   const resume = useMutation({
     mutationFn: () => api.resumeTask(task.id),
@@ -181,10 +202,30 @@ function TaskCard({ task, onChange }: { task: AgentTask; onChange: () => void })
       toast("Task resumed");
       onChange();
     },
-    onError: (e) => toast(errorMessage(e), "error"),
+    onError: failed,
+    onSettled: settled,
   });
+  const rerun = useMutation({
+    mutationFn: () => {
+      rerunKey.current ??= newIdempotencyKey("rerun");
+      return api.createTask(rerunInput(task.input), rerunKey.current);
+    },
+    onSuccess: (created) => {
+      rerunKey.current = null;
+      toast("Running the task again");
+      onCreated(created);
+    },
+    onError: (e) => toast(errorMessage(e), "error"),
+    onSettled: settled,
+  });
+  const busy = cancel.isPending || resume.isPending || rerun.isPending;
+  const act = (m: { mutate: () => void }) => () => {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    m.mutate();
+  };
   const shown = detail.data ?? task;
-  const statusText = task.interrupted ? "Interrupted" : STATUS_LABEL[task.status];
+  const statusText = task.interrupted ? "Interrupted" : task.stalled ? "Stalled" : STATUS_LABEL[task.status];
 
   return (
     <li className="card p-5" data-testid="task-card">
@@ -209,7 +250,7 @@ function TaskCard({ task, onChange }: { task: AgentTask; onChange: () => void })
         <div className="h-full bg-accent transition-all" style={{ width: `${task.progress}%` }} />
       </div>
       <p className="mt-1 text-xs text-muted">
-        Step {Math.min(task.current_step + (active ? 1 : 0), task.total_steps)} of {task.total_steps} · {task.progress}%
+        Step {Math.min(task.current_step + (progressing ? 1 : 0), task.total_steps)} of {task.total_steps} · {task.progress}%
       </p>
 
       {task.error && (
@@ -224,14 +265,19 @@ function TaskCard({ task, onChange }: { task: AgentTask; onChange: () => void })
         <button type="button" className="btn btn-sm" onClick={() => setOpen((v) => !v)} aria-expanded={open}>
           {open ? "Hide steps" : "Show steps"}
         </button>
-        {active && !task.cancel_requested && (
-          <button type="button" className="btn btn-sm" onClick={() => cancel.mutate()} disabled={cancel.isPending}>
-            Cancel
+        {controls.cancel && (
+          <button type="button" className="btn btn-sm" onClick={act(cancel)} disabled={busy} aria-busy={cancel.isPending}>
+            {cancel.isPending ? "Cancelling…" : "Cancel"}
           </button>
         )}
-        {task.resumable && (
-          <button type="button" className="btn btn-primary btn-sm" onClick={() => resume.mutate()} disabled={resume.isPending}>
-            Resume
+        {controls.resume && (
+          <button type="button" className="btn btn-primary btn-sm" onClick={act(resume)} disabled={busy} aria-busy={resume.isPending}>
+            {resume.isPending ? "Resuming…" : "Resume"}
+          </button>
+        )}
+        {controls.runAgain && (
+          <button type="button" className="btn btn-sm" onClick={act(rerun)} disabled={busy} aria-busy={rerun.isPending}>
+            {rerun.isPending ? "Starting…" : "Run again"}
           </button>
         )}
       </div>

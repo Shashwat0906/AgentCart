@@ -282,6 +282,7 @@ class TaskOut(Model):
     cancel_requested: bool
     attempt: int
     interrupted: bool
+    stalled: bool
     resumable: bool
     created_at: datetime
     updated_at: datetime

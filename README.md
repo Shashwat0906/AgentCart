@@ -28,8 +28,8 @@ Runs fully locally with **no paid API keys**: the default AI path is a determini
 | **Persistent agent tasks** | Background, multi-step research tasks (search → compare → read cart → summarise) stored in PostgreSQL with per-step status, progress, results and errors. Leased execution, safe resume after a crash or deploy without repeating finished steps, retries with exponential backoff for transient failures, cancellation, idempotent creation and per-user limits. Read-only: tasks never change the cart or buy anything. |
 | **Cart & checkout** | Server-computed totals, strict quantity validation, row-locked stock checks (no overselling), approval-time price/stock revalidation, quote → explicit confirmation → idempotent demo order. **No real payments.** |
 | **Auth** | Argon2id password hashing, JWT bearer tokens, per-user authorization on every resource, CORS from env, rate limits, structured errors. |
-| **Frontend** | React 19 + TypeScript. Home, catalogue, product, compare, assistant (with conversation history, ranking sliders, "how I got here" trace), research tasks (live progress, steps, cancel and resume), cart, checkout, orders and preferences. Loading, empty and error states; responsive; accessible (labels, focus states, live regions, reduced-motion support). |
-| **Quality** | 364 backend tests, 35 frontend unit tests, 9 Playwright E2E tests, and an 81-scenario evaluation suite with metrics. CI for lint, types, tests on PostgreSQL, evaluation thresholds, audits, E2E, Docker builds and secret scanning. |
+| **Frontend** | React 19 + TypeScript. Home, catalogue, product, compare, assistant (with conversation history, ranking sliders, "how I got here" trace), research tasks (live progress, steps, cancel, resume and run again), cart, checkout, orders and preferences. Loading, empty and error states; responsive; accessible (labels, focus states, live regions, reduced-motion support). |
+| **Quality** | 386 backend tests, 54 frontend unit tests, 9 Playwright E2E tests, and an 81-scenario evaluation suite with metrics. CI for lint, types, tests on PostgreSQL, evaluation thresholds, audits, E2E, Docker builds and secret scanning. |
 
 ## Architecture
 
@@ -146,7 +146,7 @@ Whatever model you use, it cannot add hard constraints, invent budgets or produc
 ## Testing & evaluation
 
 ```bash
-cd backend && .venv/bin/pytest                    # 364 tests, in-memory SQLite (~15 s)
+cd backend && .venv/bin/pytest                    # 386 tests, in-memory SQLite (~16 s)
 TEST_DATABASE_URL=postgresql+psycopg://agentcart:<pw>@localhost:5433/agentcart_test .venv/bin/pytest   # same suite on Postgres
 cd backend && .venv/bin/ruff check . && .venv/bin/ruff format --check . && .venv/bin/mypy app
 backend/.venv/bin/python evaluation/run_eval.py --strict   # 81 scenarios → evaluation/reports/latest.md
@@ -168,16 +168,16 @@ It measures constraint satisfaction against independent ground truth, top-1/top-
 
 ## Verification results
 
-Results from the Phase 2 branch on the development machine (macOS, Python 3.14.4, Node 22.23, Docker 28.3), 19 Oct 2026. CI runs the same checks on every pull request.
+Results from the Phase 2.1 branch on the development machine (macOS, Python 3.14.4, Node 22.23, Docker 28.3), 19 Oct 2026. CI runs the same checks on every pull request.
 
 | Check | Result |
 |---|---|
-| Backend tests (SQLite) | **364 passed**; line coverage **93%** |
-| Backend tests (PostgreSQL 16) | **364 passed** |
+| Backend tests (SQLite) | **386 passed**; line coverage **93%** |
+| Backend tests (PostgreSQL 16) | **386 passed** |
 | Alembic `0001 → 0002` on a database with existing data; downgrade and re-upgrade; `alembic check` (PostgreSQL and SQLite) | ✅ data preserved, no model/migration drift |
 | ruff lint + format, mypy (51 source files) | ✅ no issues |
 | Evaluation suite | **81/81 scenarios passed** |
-| Frontend unit tests (Vitest) | **35 passed** |
+| Frontend unit tests (Vitest) | **54 passed** |
 | ESLint, TypeScript (`tsc -b`) | ✅ no errors or warnings |
 | Production build | ✅ JS 402 KB (124 KB gzip) |
 | Playwright E2E (desktop + mobile) against Vite dev + local API | **9 passed** |
