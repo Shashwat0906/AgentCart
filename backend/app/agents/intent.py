@@ -65,8 +65,9 @@ class ShoppingIntent(BaseModel):
     sort_hint: Literal["cheapest", "best_rated"] | None = None
     # What "closest alternatives" may relax when nothing meets every hard constraint. Set only by the
     # deterministic parser from explicit user wording; None = default ("any": all hard constraints except
-    # brand exclusions, each miss labelled). "within_budget" never shows anything outside the price range;
-    # "none" shows no alternatives at all.
+    # brand exclusions, each miss labelled). "within_budget" is the strict policy ("nothing above my budget",
+    # "strictly under"): only products meeting EVERY hard constraint are shown, so no alternatives. "none"
+    # ("no alternatives") behaves the same. The value name is kept because stored conversations use it.
     alternatives_policy: AlternativesPolicy | None = None
     compare_product_ids: list[int] = Field(default_factory=list)
     preference_to_save: PreferenceProposal | None = None

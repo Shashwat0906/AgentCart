@@ -346,18 +346,16 @@ def find_alternatives(
 ) -> list[RankedProduct]:
     """Closest in-stock products that miss one or more hard constraints, clearly labelled.
 
-    Never relaxed: brand exclusions, and, when `alternatives_policy == "within_budget"`, the price range.
-    `alternatives_policy == "none"` returns nothing.
+    Only for the default policy (or an explicit "alternatives are fine"). An alternative by definition
+    violates at least one hard constraint, so a strict policy ("within_budget": the user forbade invalid
+    products, e.g. "nothing above my budget, even as alternatives") and "none" both return nothing:
+    no product failing ANY hard constraint (budget, minimum RAM, ...) is ever shown to them.
+    Brand exclusions are never relaxed under any policy.
     """
-    if intent.alternatives_policy == "none":
+    if intent.alternatives_policy in ("within_budget", "none"):
         return []
     hard = intent.hard_constraints()
-    never_relax = [
-        c
-        for c in hard
-        if (c.attribute == "brand" and c.op == "not_in")
-        or (intent.alternatives_policy == "within_budget" and c.attribute == "price_inr")
-    ]
+    never_relax = [c for c in hard if c.attribute == "brand" and c.op == "not_in"]
     scored: list[tuple[int, float, float, ProductLike, list[str]]] = []
     for p in products:
         if p.stock <= 0 or (intent.category and p.category != intent.category):

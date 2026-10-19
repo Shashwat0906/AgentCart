@@ -935,7 +935,7 @@ def describe_intent(intent: ShoppingIntent) -> list[str]:
     elif intent.sort_hint == "best_rated":
         chips.append("Best rated first")
     if intent.alternatives_policy == "within_budget":
-        chips.append("Nothing above budget")
+        chips.append("Strict: exact matches only")
     elif intent.alternatives_policy == "none":
         chips.append("Exact matches only")
     return list(dict.fromkeys(chips))

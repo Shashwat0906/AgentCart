@@ -17,6 +17,7 @@ from app.agents.parser import RequestParser
 from app.agents.tools import InMemoryCatalog, ToolBox, snapshots_from_seed
 from app.core.config import Settings
 from app.providers import MockProvider, build_provider
+from app.services.ranking import evaluate
 
 SNAPS = snapshots_from_seed()
 BY_ID = {p.id: p for p in SNAPS}
@@ -47,6 +48,19 @@ def laptops(pred: Any) -> set[int]:
     return {p.id for p in SNAPS if p.category == "laptops" and p.stock > 0 and pred(p)}
 
 
+def violating(r: AgentResult) -> list[tuple[str, list[str]]]:
+    """Every shown product (recommendation or alternative) that fails ANY hard constraint of the request,
+    checked against catalogue data with the same evaluator the ranking uses."""
+    assert r.intent is not None
+    hard = r.intent.hard_constraints()
+    out = []
+    for c in r.recommendations + r.alternatives:
+        failed = [h.label for h in hard if evaluate(h, BY_ID[c["product_id"]]) is not True]
+        if failed:
+            out.append((c["name"], failed))
+    return out
+
+
 # ------------------------------------------------------------------ follow-up updates the budget
 def test_follow_up_changes_budget_from_70k_to_50k_and_adds_ram() -> None:
     r1, r2 = follow_up("I need a laptop under ₹70,000", "now under ₹50,000 with at least 16GB RAM")
@@ -66,18 +80,56 @@ def test_no_over_budget_product_when_prohibited(second: str) -> None:
     shown = r2.recommendations + r2.alternatives
     assert all(c["price_inr"] <= 50_000 for c in shown), [(c["name"], c["price_inr"]) for c in shown]
     assert not {56_990, 59_990} & {c["price_inr"] for c in shown}
-    assert "Nothing above budget" in r2.understood
-    assert "nothing above ₹50,000" in r2.summary.lower()
+    assert violating(r2) == []
+    assert "Strict: exact matches only" in r2.understood
+    assert "not showing anything above ₹50,000" in r2.summary
 
 
-def test_within_budget_alternatives_are_labelled_with_the_requirement_they_miss() -> None:
-    _, r2 = follow_up("I need a laptop under ₹70,000", STRICT_PHRASES[0])
-    assert r2.alternatives, "under-budget near misses exist (8 GB laptops), so they are offered, clearly labelled"
-    for c in r2.alternatives:
-        assert c["is_alternative"] is True
-        assert ram(c) < 16  # they miss RAM, and say so; RAM is never silently relaxed
-        assert any("RAM" in v and "16 GB" in v for v in c["violations"]), c["violations"]
-        assert not any("over your budget" in v for v in c["violations"])
+# Production regression: strict wording still showed HP 15s (₹36,490, 8 GB) and MSI Thin GF63 (₹46,990,
+# 8 GB) as "alternatives" because only the price limit was protected; minimum RAM was still relaxed.
+PROD_QUERY = (
+    "Find laptops strictly under ₹50,000 with at least 16GB RAM. "
+    "Do not show products above my budget, even as alternatives."
+)
+
+
+def test_strict_query_shows_no_product_violating_any_hard_constraint() -> None:
+    r = run_agent(PROD_QUERY, deps())
+    assert r.intent is not None and r.intent.alternatives_policy == "within_budget"
+    assert {c.label for c in r.intent.hard_constraints()} == {"RAM ≥ 16 GB", "Price ≤ ₹50,000"}
+    assert r.response_type == "no_results"
+    assert r.recommendations == [] and r.alternatives == []  # no laptop meets both; nothing invalid shown
+    assert violating(r) == []
+    names = {c["name"] for c in r.recommendations + r.alternatives}
+    assert not any(n.startswith(("HP 15s", "MSI Thin GF63")) for n in names)
+    assert "not showing anything above ₹50,000 or outside your requirements" in r.summary
+
+
+@pytest.mark.parametrize(
+    ("query", "violated"),
+    [
+        # Nothing ≤ ₹50,000 has 16 GB: near misses would break RAM (8 GB) or the budget (₹54,990+).
+        ("laptop strictly under ₹50,000 with at least 16GB RAM", {"RAM", "budget"}),
+        # Nothing ≤ ₹70,000 has 32 GB: near misses would break RAM (16 GB) or the budget (32 GB models).
+        ("laptop strictly under ₹70,000 with at least 32GB RAM", {"RAM", "budget"}),
+        # Only one laptop is ≤ ₹30,000 and it has 8 GB: near misses would break either.
+        ("laptop under ₹30,000 with 16GB RAM, nothing above my budget", {"RAM", "budget"}),
+    ],
+)
+def test_strict_policy_blocks_alternatives_that_would_break_budget_or_ram(query: str, violated: set[str]) -> None:
+    strict = run_agent(query, deps())
+    assert strict.recommendations == [] and strict.alternatives == [] and violating(strict) == []
+    # The same request without strict wording proves invalid near misses existed and are what got blocked.
+    default = run_agent(query.replace("strictly ", "").replace(", nothing above my budget", ""), deps())
+    assert default.intent is not None and default.intent.alternatives_policy is None
+    assert default.alternatives and len(violating(default)) == len(default.alternatives)
+    seen: set[str] = set()
+    for c in default.alternatives:
+        if any("RAM" in v for v in c["violations"]):
+            seen.add("RAM")
+        if any("over your budget" in v for v in c["violations"]):
+            seen.add("budget")
+    assert seen and seen <= violated, seen
 
 
 def test_strictness_persists_to_later_follow_ups_until_lifted() -> None:
@@ -196,8 +248,9 @@ def test_mock_provider_needs_no_key_and_adds_nothing(monkeypatch: pytest.MonkeyP
     provider = build_provider(Settings(_env_file=None, environment="test"))  # type: ignore[call-arg]
     assert isinstance(provider, MockProvider)
     assert provider.complete_json("system", "user") == {}  # no canned extraction
-    a = follow_up("I need a laptop under ₹70,000", STRICT_PHRASES[0])[1]
-    b = follow_up("I need a laptop under ₹70,000", STRICT_PHRASES[0])[1]
+    a = follow_up("I need a laptop under ₹70,000", "now under ₹50,000 with at least 16GB RAM")[1]
+    b = follow_up("I need a laptop under ₹70,000", "now under ₹50,000 with at least 16GB RAM")[1]
+    assert a.alternatives  # non-empty, so the comparison below is meaningful
     assert [c["product_id"] for c in a.alternatives] == [c["product_id"] for c in b.alternatives]  # deterministic
     assert a.provider == "mock"
 
@@ -233,19 +286,44 @@ def test_chat_api_strictness_holds_for_primary_and_alternatives_across_turns(
 
     # A refinement adds RAM; the budget AND the strictness persist from the stored conversation context.
     _, p3 = _turn(client, auth, "and at least 16GB RAM", cid)
-    assert {"≤ ₹50,000", "RAM ≥ 16 GB (required)", "Nothing above budget"} <= set(p3["understood"])
+    assert {"≤ ₹50,000", "RAM ≥ 16 GB (required)", "Strict: exact matches only"} <= set(p3["understood"])
     assert p3["recommendations"] == []  # none exist; hard constraints are not relaxed into primary results
-    assert p3["alternatives"] and all(c["price_inr"] <= 50_000 for c in p3["alternatives"])
-    assert all(int(BY_ID[c["product_id"]].specs.get("ram_gb") or 0) < 16 for c in p3["alternatives"])
+    assert p3["alternatives"] == []  # strict: no 8 GB laptop and no over-budget laptop is shown
 
-    # The user lifts the restriction: labelled over-budget alternatives are allowed again.
+    # The user lifts the restriction: labelled near misses (RAM or budget) are allowed again.
     _, p4 = _turn(client, auth, "ok, alternatives are fine", cid)
-    assert "Nothing above budget" not in p4["understood"]
+    assert "Strict: exact matches only" not in p4["understood"]
+    assert p4["alternatives"] and all(c["is_alternative"] and c["violations"] for c in p4["alternatives"])
     assert any(c["price_inr"] > 50_000 for c in p4["alternatives"])
+
+
+def test_chat_api_production_query_as_follow_up_shows_no_invalid_alternatives(
+    client: TestClient, auth: dict[str, str]
+) -> None:
+    hard = {"price_max": 50_000, "ram_min": 16}
+
+    def valid(c: dict[str, Any]) -> bool:
+        return (
+            c["price_inr"] <= hard["price_max"]
+            and int(BY_ID[c["product_id"]].specs.get("ram_gb") or 0) >= hard["ram_min"]
+        )
+
+    cid, _ = _turn(client, auth, "Find laptops under ₹70,000")
+    _, p2 = _turn(client, auth, "Now " + PROD_QUERY[0].lower() + PROD_QUERY[1:], cid)
+    shown = (p2.get("recommendations") or []) + (p2.get("alternatives") or [])
+    assert all(valid(c) for c in shown), [(c["name"], c["price_inr"]) for c in shown]
+    assert not any(c["name"].startswith(("HP 15s", "MSI Thin GF63")) for c in shown)
+    assert p2["alternatives"] == [] and "Strict: exact matches only" in p2["understood"]
+
+    # Strictness and both hard constraints survive another refinement in the same conversation.
+    _, p3 = _turn(client, auth, "and with an SSD please", cid)
+    assert {"≤ ₹50,000", "RAM ≥ 16 GB (required)", "Strict: exact matches only"} <= set(p3["understood"])
+    shown = (p3.get("recommendations") or []) + (p3.get("alternatives") or [])
+    assert all(valid(c) for c in shown) and p3["alternatives"] == []
 
 
 def test_chat_api_new_conversation_does_not_inherit_strictness(client: TestClient, auth: dict[str, str]) -> None:
     _turn(client, auth, "laptop under ₹50,000 with 16GB RAM, nothing above my budget")
     _, fresh = _turn(client, auth, "laptop under ₹50,000 with 16GB RAM")  # no conversation_id
-    assert "Nothing above budget" not in fresh["understood"]
+    assert "Strict: exact matches only" not in fresh["understood"]
     assert any(c["price_inr"] > 50_000 for c in fresh["alternatives"])
