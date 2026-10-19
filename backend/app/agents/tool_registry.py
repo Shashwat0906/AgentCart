@@ -25,6 +25,8 @@ from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
+from app.agents.intent import Constraint, ShoppingIntent
+from app.agents.planner import ConstraintReport
 from app.core.config import Settings
 from app.core.errors import AppError, NotFoundError, ValidationFailed
 from app.models import Cart
@@ -32,6 +34,7 @@ from app.schemas import CartOut, ComparisonOut, ProductDetailOut, ProductPage
 from app.services import cart as cart_service
 from app.services import catalog
 from app.services.catalog import SortKey
+from app.services.ranking import evaluate, violation_message
 from app.services.specs import CATEGORY_LABELS
 
 logger = logging.getLogger("agentcart.tools")
@@ -120,13 +123,48 @@ class ReadCartInput(ToolInput):
     """No arguments: the cart is always the caller's own, taken from the context, never from input."""
 
 
+class EvaluateConstraintsInput(ToolInput):
+    """Only product ids: the requirements are the task's own (`ToolContext.constraints`), so a caller,
+    including a model, can't loosen or replace them."""
+
+    product_ids: list[int] = Field(min_length=1, max_length=24)
+
+    @field_validator("product_ids")
+    @classmethod
+    def _positive_unique(cls, v: list[int]) -> list[int]:
+        if any(i < 1 for i in v):
+            raise ValueError("product ids must be positive")
+        if len(set(v)) != len(v):
+            raise ValueError("product ids must be unique")
+        return v
+
+
 # ------------------------------------------------------------------ execution types
+@dataclass(frozen=True)
+class TaskConstraints:
+    """The hard requirements of the task being executed: its category and hard constraints (budget
+    included). Built by the runner from the deterministic intent, never from tool arguments."""
+
+    category: str | None
+    hard: tuple[Constraint, ...]
+
+    @classmethod
+    def from_intent(cls, intent: ShoppingIntent) -> TaskConstraints:
+        return cls(category=intent.category, hard=tuple(intent.hard_constraints()))
+
+    def labels(self) -> list[str]:
+        out = [f"Category: {CATEGORY_LABELS[self.category]}"] if self.category else []
+        out += [c.label or c.attribute for c in self.hard]
+        return [*out, "In stock"]
+
+
 @dataclass(frozen=True)
 class ToolContext:
     db: Session
     settings: Settings
     user_id: int | None = None  # the authenticated caller; never taken from tool arguments
     allowed_permissions: frozenset[str] = frozenset({"read"})
+    constraints: TaskConstraints | None = None  # the task's requirements, for evaluate_constraints
 
 
 @dataclass(frozen=True)
@@ -336,6 +374,30 @@ def _read_cart(ctx: ToolContext, inp: ReadCartInput) -> dict[str, Any]:
     return cart_service.cart_view(cart if cart is not None else Cart(user_id=ctx.user_id), ctx.settings)
 
 
+def _evaluate_constraints(ctx: ToolContext, inp: EvaluateConstraintsInput) -> dict[str, Any]:
+    """Pass/fail per product against the task's category, every hard constraint and stock, using the same
+    `ranking.evaluate` that filters recommendations. An unknown attribute counts as a failure."""
+    req = ctx.constraints
+    if req is None:
+        raise ValidationFailed("This tool checks a task's requirements, and none were provided")
+    products = {p.id: p for p in catalog.products_by_ids(ctx.db, list(inp.product_ids))}
+    if len(products) != len(inp.product_ids):
+        raise NotFoundError("One or more products do not exist")
+    results = []
+    for pid in inp.product_ids:  # requested order
+        p = products[pid]
+        violations: list[str] = []
+        if req.category is not None and p.category != req.category:
+            violations.append(
+                f"Category: {CATEGORY_LABELS.get(p.category, p.category)} (you asked for {CATEGORY_LABELS[req.category]})"
+            )
+        violations += [violation_message(c, p) for c in req.hard if evaluate(c, p) is not True]
+        if p.stock <= 0:
+            violations.append("Out of stock")
+        results.append({"product_id": pid, "passes": not violations, "violations": violations})
+    return {"results": results, "constraints": req.labels()}
+
+
 READ_ONLY_TOOLS: tuple[ToolSpec, ...] = (
     ToolSpec(
         name="search_catalog",
@@ -365,6 +427,16 @@ READ_ONLY_TOOLS: tuple[ToolSpec, ...] = (
         output_model=CartOut,
         handler=_read_cart,
         requires_user=True,
+    ),
+    ToolSpec(
+        name="evaluate_constraints",
+        description=(
+            "Check products against the task's own hard requirements (category, budget, specs, stock). "
+            "Returns pass or fail and every violation for each product."
+        ),
+        input_model=EvaluateConstraintsInput,
+        output_model=ConstraintReport,
+        handler=_evaluate_constraints,
     ),
 )
 
