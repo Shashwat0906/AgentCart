@@ -344,6 +344,8 @@ export interface AgentTask {
   cancel_requested: boolean;
   attempt: number;
   interrupted: boolean;
+  /** Queued, but its scheduled run was lost (nothing happened for longer than a runner lease). */
+  stalled: boolean;
   resumable: boolean;
   created_at: string;
   updated_at: string;

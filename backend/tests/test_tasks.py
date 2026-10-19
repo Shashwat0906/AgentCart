@@ -405,7 +405,7 @@ def test_resume_reuses_stored_output_and_runs_only_unfinished_steps(
     calls.behaviour["compare_products"] = transient(99)
     runner(SessionLocal, calls).run(tid)
     with SessionLocal() as s:
-        task_service.prepare_resume(s, uid(client, h), tid)
+        task_service.prepare_resume(s, uid(client, h), tid, get_settings())
     calls.behaviour.clear()
     assert runner(SessionLocal, calls).run(tid) == "succeeded"
     assert calls.count["search_catalog"] == 1 and calls.count["compare_products"] == 3 + 1

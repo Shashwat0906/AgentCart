@@ -30,8 +30,19 @@ test("research task runs in the background, persists its steps and never touches
   await expect(steps.nth(0)).toContainText("Search the catalogue");
   await expect(steps.nth(3)).toContainText("succeeded");
 
-  // The task survives a reload: it is persisted server-side, not held in the page.
+  // A completed task offers only "Run again" (Cancel and Resume don't apply).
+  await expect(card.getByRole("button", { name: "Cancel" })).toHaveCount(0);
+  await expect(card.getByRole("button", { name: "Resume" })).toHaveCount(0);
+  await card.getByRole("button", { name: "Run again" }).dblclick(); // a double click must not create two tasks
+  const cards = page.getByTestId("task-card");
+  await expect(cards).toHaveCount(2);
+  await expect(cards.first().getByTestId("task-status")).toHaveText("Done", { timeout: 20_000 }); // polled to completion
+  await expect(cards.first()).toContainText("Research laptops under ₹50,000");
+  await expect(cards.nth(1).getByTestId("task-status")).toHaveText("Done"); // the original is untouched
+
+  // Tasks survive a reload: they are persisted server-side, not held in the page.
   await page.reload();
+  await expect(page.getByTestId("task-card")).toHaveCount(2);
   await expect(page.getByTestId("task-card").first().getByTestId("task-status")).toHaveText("Done");
 
   // Read-only: the cart is still empty.

@@ -147,9 +147,20 @@ def is_interrupted(task: AgentTask, now: datetime | None = None) -> bool:
     return task.status == "running" and (until is None or until <= (now or _now()))
 
 
-def is_resumable(task: AgentTask, now: datetime | None = None) -> bool:
+def is_stalled(task: AgentTask, *, stale_after_seconds: int, now: datetime | None = None) -> bool:
+    """Queued, and nothing has happened for longer than a runner lease: its scheduled run was lost
+    (e.g. a deploy right after it was created or resumed). A freshly queued task is about to run."""
+    changed = _aware(task.updated_at) or _aware(task.created_at)
+    return (
+        task.status == "queued"
+        and changed is not None
+        and changed <= (now or _now()) - timedelta(seconds=stale_after_seconds)
+    )
+
+
+def is_resumable(task: AgentTask, *, stale_after_seconds: int, now: datetime | None = None) -> bool:
     if task.status == "queued":
-        return True
+        return is_stalled(task, stale_after_seconds=stale_after_seconds, now=now)
     if is_interrupted(task, now):
         return True
     return task.status == "failed" and bool((task.error or {}).get("retryable"))
@@ -221,9 +232,9 @@ def request_cancel(db: Session, user_id: int, task_id: str) -> AgentTask:
     return task
 
 
-def prepare_resume(db: Session, user_id: int, task_id: str) -> AgentTask:
+def prepare_resume(db: Session, user_id: int, task_id: str, settings: Settings) -> AgentTask:
     task = get_owned(db, user_id, task_id)
-    if task.cancel_requested or not is_resumable(task):
+    if task.cancel_requested or not is_resumable(task, stale_after_seconds=settings.task_lease_seconds):
         reason = "running" if task.status == "running" else task.status
         raise ConflictError("This task can't be resumed", details={"status": task.status, "reason": reason})
     if task.status == "failed":
@@ -233,6 +244,8 @@ def prepare_resume(db: Session, user_id: int, task_id: str) -> AgentTask:
         task.status, task.error, task.finished_at = "queued", None, None
     elif is_interrupted(task):
         task.status, task.locked_by, task.locked_until = "queued", None, None
+    # Restart the grace period: a just-resumed task is not "stalled" again until its new run is lost too.
+    task.updated_at = _now()
     db.commit()
     return task
 

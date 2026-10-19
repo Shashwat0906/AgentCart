@@ -109,7 +109,7 @@ A task is multi-step agent work that runs in the background and survives restart
 | GET | `/tasks` | The caller's tasks, newest first (up to 50), without steps |
 | GET | `/tasks/{id}` | One task with its steps |
 | POST | `/tasks/{id}/cancel` | A queued or interrupted task is cancelled at once; a running one stops at the next step boundary (`cancel_requested: true`). 409 if already finished. |
-| POST | `/tasks/{id}/resume` | Re-runs only the unfinished steps of a queued, interrupted, or retryably failed task; finished steps are never repeated. 409 otherwise. |
+| POST | `/tasks/{id}/resume` | Re-runs only the unfinished steps of a *stalled* queued task, an interrupted task, or a retryably failed task; finished steps are never repeated. 409 otherwise, including for a freshly queued task (it is about to run). |
 
 `product_research` input (strict: unknown fields and type coercion are rejected):
 
@@ -125,7 +125,20 @@ A task is multi-step agent work that runs in the background and survives restart
 
 Steps: `search` (`search_catalog`) → `compare` (`compare_products`; skipped when fewer than 2 products match) → `cart` (`read_cart`, optional) → `summarize` (built in, deterministic). The result has `matches`, `top`, `best` (lowest price / best rated), `cart` and `all_within_budget`.
 
-Task fields: `status` (`queued` · `running` · `succeeded` · `failed` · `cancelled`), `progress` (0–100), `current_step`, `total_steps`, `result`, `error` (`{code, message, retryable, step}`), `cancel_requested`, `attempt` (runs started), `interrupted` (running but its runner's lease expired), `resumable`, and timestamps. Step fields: `status` (`queued` · `running` · `succeeded` · `failed` · `skipped` · `cancelled`), `attempts`, `max_attempts`, `args` (frozen when the step first runs), `output`, `error`.
+Task fields: `status` (`queued` · `running` · `succeeded` · `failed` · `cancelled`), `progress` (0–100), `current_step`, `total_steps`, `result`, `error` (`{code, message, retryable, step}`), `cancel_requested`, `attempt` (runs started), `interrupted` (running but its runner's lease expired), `stalled` (queued, but nothing has happened for longer than `TASK_LEASE_SECONDS`, so its scheduled run was lost), `resumable`, and timestamps. Step fields: `status` (`queued` · `running` · `succeeded` · `failed` · `skipped` · `cancelled`), `attempts`, `max_attempts`, `args` (frozen when the step first runs), `output`, `error`.
+
+Controls shown on the Tasks page (the server re-checks every action):
+
+| State | Cancel | Resume | Run again |
+|---|---|---|---|
+| queued | ✓ | only if `stalled` | — |
+| running | ✓ (stops at the next step) | — | — |
+| interrupted | ✓ | ✓ | — |
+| succeeded | — | — | ✓ |
+| failed | — | only if `retryable` | ✓ |
+| cancelled | — | — | ✓ |
+
+**Run again** creates a new task with `POST /tasks`, sending the original task's `input` (empty fields dropped) and a fresh `idempotency_key` that is reused if the request is retried, so a double click or a retry after a network error can't create a duplicate. The original task is not modified.
 
 Recovery: transient tool failures (`temporarily_unavailable`) are retried with exponential backoff up to `TASK_STEP_MAX_ATTEMPTS`; if they persist the task fails with `retryable: true` and can be resumed. Permanent failures (`invalid_input`, `not_found`, `unknown_tool`, …) are not retryable. Other users' tasks are 404.
 
