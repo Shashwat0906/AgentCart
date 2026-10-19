@@ -11,7 +11,7 @@ import re
 from collections.abc import Iterable
 from typing import Literal
 
-from app.agents.intent import Constraint, Op, PreferenceProposal, ShoppingIntent, SoftPreference
+from app.agents.intent import AlternativesPolicy, Constraint, Op, PreferenceProposal, ShoppingIntent, SoftPreference
 from app.services.specs import format_inr
 
 Direction = Literal["max", "min", "true"]
@@ -175,7 +175,9 @@ _UNIT_GUARD = (
 )
 MONEY = re.compile(
     r"(?P<cur>₹|\brs\.?|\binr\b|\brupees?\b)?\s*"
-    r"(?<![\d,.])(?P<num>\d{1,3}(?:,\d{2,3})+|\d+(?:\.\d+)?)(?![\d,.])\s*"
+    # The trailing guard rejects a digit, or a "," / "." that continues the number ("50,0"), but not
+    # sentence punctuation: "under ₹50,000, 16GB RAM" and "under ₹50,000." must still parse.
+    r"(?<![\d,.])(?P<num>\d{1,3}(?:,\d{2,3})+|\d+(?:\.\d+)?)(?!\d|[,.]\d)\s*"
     r"(?P<suf>k\b|thousand\b|lakhs?\b|lacs?\b|l\b|cr\b|crore\b)?" + _UNIT_GUARD + r"(?:\s*(?:rs\.?|rupees|inr|/-))?",
     re.I,
 )
@@ -187,7 +189,7 @@ _MAX_CUES = re.compile(
 )
 _APPROX_CUES = re.compile(r"(around|about|approx(imately)?|roughly|~)\s*$", re.I)
 _MIN_CUES = re.compile(r"(above|over|more than|at least|minimum|min|starting( from| at)?|from)\s*$", re.I)
-_MONEY_SIDE = r"(?:₹\s*|rs\.?\s*)?(?<![\d,.])\d[\d,]*(?:\.\d+)?(?![\d,.])\s*(?:k\b|lakhs?\b|lacs?\b)?"
+_MONEY_SIDE = r"(?:₹\s*|rs\.?\s*)?(?<![\d,.])\d[\d,]*(?:\.\d+)?(?!\d|[,.]\d)\s*(?:k\b|lakhs?\b|lacs?\b)?"
 _RANGE = re.compile(
     r"(?P<between>between\s+)?(?P<a>" + _MONEY_SIDE + r")\s*(?:-|–|to|and)\s*(?P<b>" + _MONEY_SIDE + r")"
     r"(?!\s*(?:gb|tb|hz|inch|inches|mp|mah|w\b|h\b|hours?|days?|kg|g\b|mm|ms|dpi))",
@@ -254,6 +256,7 @@ class RequestParser:
         self._rating(low, intent)
         self._cart(low, intent)
         self._sort_hint(low, intent)
+        self._alternatives_policy(low, intent)
         self._kind(low, intent)
         self._dedupe(intent)
         return intent
@@ -788,6 +791,60 @@ class RequestParser:
         if re.search(r"\bcheaper\b|less expensive|lower price|lower budget", low):
             intent.keywords.append("__cheaper__")
 
+    # ------------------------------------------------------------------ alternatives policy
+    _NEG = r"(?:do\s*n[o']t|don't|dont|never|no|not|nothing|without|avoid|stop)"
+    _OVER_BUDGET = (
+        r"(?:above|over|beyond|more than|exceed\w*|outside|higher than)\s+(?:my\s+|the\s+|this\s+|that\s+)?"
+        r"(?:budget|price\s+(?:limit|cap|range)|limit|max(?:imum)?)|over[- ]budget|above[- ]budget|pricier|more expensive"
+    )
+
+    # Explicit permission: "I don't mind going over budget", "no problem with alternatives", "… is fine".
+    _PERMIT = (
+        r"\b(?:do\s*n[o']t|don't|dont|wouldn't|won't)\s+mind\b|\b(?:do\s*n[o']t|don't|dont)\s+worry\b"
+        r"|\b(?:not|no)\s+(?:a\s+|any\s+)?problem\b|\bdoes\s*n[o']?t\s+matter\b"
+        r"|\b(?:is|are|'s|'re)\s+(?:fine|ok(?:ay)?|allowed|acceptable)\b|\b(?:fine|ok(?:ay)?|happy)\s+with\b"
+        r"|\b(?:show|include|suggest|give)\b[^.;!?]{0,25}\balternatives?\b"
+    )
+    _ALT_TOPIC = r"\balternatives?\b|over[- ]budget|above[- ]budget|\b(?:over|above|beyond)\s+(?:my\s+|the\s+)?budget\b|slightly over"
+    # Clause boundaries; ", " (with a space) so "₹50,000" stays whole.
+    _CLAUSE = re.compile(r"[.;!?]|,\s|\bbut\b|\bhowever\b|\bthough\b")
+
+    def _alternatives_policy(self, low: str, intent: ShoppingIntent) -> None:
+        """Explicit wording about what may be shown when nothing matches every requirement.
+
+        Each clause is read on its own ("alternatives are fine, but nothing above my budget" has two);
+        permission wins within a clause, and the strictest instruction wins across clauses.
+        """
+        rank: dict[AlternativesPolicy, int] = {"any": 0, "within_budget": 1, "none": 2}
+        found: list[AlternativesPolicy] = []
+        for clause in self._CLAUSE.split(low):
+            policy = self._clause_policy(clause)
+            if policy is not None:
+                found.append(policy)
+        if found:
+            strictest: AlternativesPolicy = max(found, key=rank.__getitem__)
+            intent.alternatives_policy = strictest
+
+    def _clause_policy(self, clause: str) -> AlternativesPolicy | None:
+        neg = self._NEG
+        negated_show = re.search(rf"\b{neg}\b[^.;!?]{{0,15}}\b(?:show|include|suggest|give)\b", clause)
+        if re.search(self._PERMIT, clause) and re.search(self._ALT_TOPIC, clause) and not negated_show:
+            return "any"
+        targets_budget = re.search(rf"\b{neg}\b[^.;!?]{{0,40}}(?:{self._OVER_BUDGET})", clause)
+        if not targets_budget and re.search(
+            rf"\b{neg}\b[^.;!?]{{0,30}}\b(?:alternatives?|suggestions?|substitutes?|other options)\b"
+            r"|\bonly\s+(?:show\s+)?(?:exact|perfect|strict)\s+match(?:es)?\b|\bexact\s+matches\s+only\b",
+            clause,
+        ):
+            return "none"
+        if targets_budget or re.search(
+            r"\bstrict(?:ly)?\s+(?:under|below|within|budget)\b|\bhard\s+(?:budget|limit|cap)\b"
+            r"|\b(?:must|should)\s*n[o']?t\s+exceed\b|\bnot\s+a\s+(?:rupee|single\s+rupee)\s+more\b",
+            clause,
+        ):
+            return "within_budget"
+        return None
+
     # ------------------------------------------------------------------ intent kind
     def _kind(self, low: str, intent: ShoppingIntent) -> None:
         if re.search(
@@ -877,4 +934,8 @@ def describe_intent(intent: ShoppingIntent) -> list[str]:
         chips.append("Lowest price first")
     elif intent.sort_hint == "best_rated":
         chips.append("Best rated first")
+    if intent.alternatives_policy == "within_budget":
+        chips.append("Nothing above budget")
+    elif intent.alternatives_policy == "none":
+        chips.append("Exact matches only")
     return list(dict.fromkeys(chips))

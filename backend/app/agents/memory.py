@@ -54,6 +54,9 @@ def merge_with_context(intent: ShoppingIntent, context: dict[str, Any], text: st
     merged.use_cases = list(dict.fromkeys(merged.use_cases + intent.use_cases))
     if intent.sort_hint:
         merged.sort_hint = intent.sort_hint
+    # "Nothing above my budget" stays in force for later refinements until the user says otherwise.
+    if intent.alternatives_policy is not None:
+        merged.alternatives_policy = intent.alternatives_policy
     last_top = context.get("last_top_price")
     if "__cheaper__" in intent.keywords and isinstance(last_top, int) and intent.budget_max is None:
         merged.budget_max = min(last_top - 1, merged.budget_max or last_top)

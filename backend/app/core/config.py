@@ -86,7 +86,11 @@ class Settings(BaseSettings):
 
     @property
     def cors_origin_list(self) -> list[str]:
-        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+        # Browsers send Origin as scheme://host[:port] with no path or trailing slash, and CORS
+        # matching is exact. Normalise values pasted from an address bar ("https://x.app/") or
+        # with stray quotes so they still match.
+        origins = (o.strip().strip("\"'").strip().rstrip("/") for o in self.cors_origins.split(","))
+        return [o for o in origins if o]
 
     @property
     def ranking_weights(self) -> dict[str, float]:

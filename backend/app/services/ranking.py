@@ -344,14 +344,26 @@ def find_alternatives(
     weights: dict[str, float] | None = None,
     limit: int = 3,
 ) -> list[RankedProduct]:
-    """Closest in-stock products that miss one or more hard constraints, clearly labelled."""
+    """Closest in-stock products that miss one or more hard constraints, clearly labelled.
+
+    Never relaxed: brand exclusions, and, when `alternatives_policy == "within_budget"`, the price range.
+    `alternatives_policy == "none"` returns nothing.
+    """
+    if intent.alternatives_policy == "none":
+        return []
     hard = intent.hard_constraints()
+    never_relax = [
+        c
+        for c in hard
+        if (c.attribute == "brand" and c.op == "not_in")
+        or (intent.alternatives_policy == "within_budget" and c.attribute == "price_inr")
+    ]
     scored: list[tuple[int, float, float, ProductLike, list[str]]] = []
     for p in products:
         if p.stock <= 0 or (intent.category and p.category != intent.category):
             continue
-        # Brand exclusions are never relaxed — the user explicitly ruled those out.
-        if any(c.attribute == "brand" and c.op == "not_in" and evaluate(c, p) is False for c in hard):
+        # The user explicitly ruled these out, so a near miss here is not an alternative.
+        if any(evaluate(c, p) is not True for c in never_relax):
             continue
         failed = [c for c in hard if evaluate(c, p) is not True]
         if not failed:

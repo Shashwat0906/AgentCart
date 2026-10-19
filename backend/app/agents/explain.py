@@ -83,8 +83,23 @@ def no_result_summary(intent: ShoppingIntent, info: FilterResult, alternatives: 
     if info.out_of_stock_matches:
         names = ", ".join(p.name for p in info.out_of_stock_matches[:2])
         parts.append(f"{names} would match but {'is' if len(info.out_of_stock_matches) == 1 else 'are'} out of stock.")
-    if alternatives:
+    within = intent.alternatives_policy == "within_budget" and intent.budget_max is not None
+    if alternatives and within:
+        parts.append(
+            f"As you asked, nothing above {format_inr(intent.budget_max or 0)} is shown. These are the closest "
+            "options within your budget; each one is clearly labelled with the requirement it misses."
+        )
+    elif alternatives:
         parts.append("Here are the closest alternatives — each one is clearly labelled with what it misses.")
+    elif intent.alternatives_policy == "none":
+        parts.append(
+            "As you asked, I'm not suggesting alternatives. Try relaxing your budget or one of the requirements."
+        )
+    elif within:
+        parts.append(
+            f"As you asked, I'm not showing anything above {format_inr(intent.budget_max or 0)}, and nothing within "
+            "it comes close. Try relaxing one of the other requirements, or raise the budget if you're open to it."
+        )
     else:
         parts.append("Try relaxing your budget or one of the requirements.")
     return " ".join(parts)

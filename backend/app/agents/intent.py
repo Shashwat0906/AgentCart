@@ -12,6 +12,8 @@ from pydantic import BaseModel, Field
 
 Op = Literal["lte", "gte", "eq", "neq", "in", "not_in"]
 Scalar = float | int | bool | str
+AlternativesPolicy = Literal["any", "within_budget", "none"]
+
 IntentKind = Literal[
     "search",  # find / recommend products
     "compare",  # compare named products
@@ -61,6 +63,11 @@ class ShoppingIntent(BaseModel):
     cart_quantity: int = Field(default=1, ge=1)
     reference_index: int | None = Field(default=None, ge=0)
     sort_hint: Literal["cheapest", "best_rated"] | None = None
+    # What "closest alternatives" may relax when nothing meets every hard constraint. Set only by the
+    # deterministic parser from explicit user wording; None = default ("any": all hard constraints except
+    # brand exclusions, each miss labelled). "within_budget" never shows anything outside the price range;
+    # "none" shows no alternatives at all.
+    alternatives_policy: AlternativesPolicy | None = None
     compare_product_ids: list[int] = Field(default_factory=list)
     preference_to_save: PreferenceProposal | None = None
     inherited_from_context: bool = False

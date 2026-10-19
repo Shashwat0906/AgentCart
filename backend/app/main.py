@@ -56,6 +56,8 @@ def create_app() -> FastAPI:
         allow_headers=["Authorization", "Content-Type"],
         max_age=600,
     )
+    # Origins are public URLs, not secrets; logging them makes a CORS_ORIGINS mismatch visible.
+    logging.getLogger("agentcart").info("CORS allowed origins: %s", ", ".join(settings.cors_origin_list) or "(none)")
     install_error_handlers(app)
     app.include_router(routes_public.router, prefix="/api")
     app.include_router(routes_user.router, prefix="/api")
