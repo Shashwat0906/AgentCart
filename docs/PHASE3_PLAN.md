@@ -54,3 +54,10 @@ goal ─► RequestParser + validate_intent (deterministic intent and hard const
 | **S4** | Approval-gated proposals | Pending actions only, with the cart unchanged; proposals refused where not permitted or where they would break hard constraints; no duplicates on resume; approval revalidates price and stock and is idempotent; no checkout tool. |
 | **S5** | Optional `LLMPlanner` | Works with no key; unknown or unauthorized tools, prompt injection, malformed output, timeouts and invented budgets can't widen capability or constraints. |
 | **S6** | API, frontend, E2E, docs, evaluation | Full regression on SQLite and PostgreSQL, strict evaluation, Playwright, CI green; production configuration unchanged. |
+
+## Progress
+
+| Stage | Status | Commit / PR |
+|---|---|---|
+| S1 | ✅ Planner contracts and `RuleBasedPlanner` (`app/agents/planner.py`); 51 tests | this PR |
+| S2–S6 | Not started | — |
