@@ -33,6 +33,7 @@ export function Layout() {
       </NavLink>
       {isAuthenticated && (
         <>
+          <NavLink to="/tasks" className={navCls} onClick={() => setOpen(false)}>Tasks</NavLink>
           <NavLink to="/orders" className={navCls} onClick={() => setOpen(false)}>Orders</NavLink>
           <NavLink to="/preferences" className={navCls} onClick={() => setOpen(false)}>
             <span className="inline-flex items-center gap-1.5"><SlidersHorizontal size={15} aria-hidden /> Preferences</span>

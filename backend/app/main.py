@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import JSONResponse
 
-from app.api import routes_public, routes_user
+from app.api import routes_public, routes_tasks, routes_user
 from app.core.config import get_settings
 from app.core.errors import install_error_handlers
 
@@ -61,6 +61,7 @@ def create_app() -> FastAPI:
     install_error_handlers(app)
     app.include_router(routes_public.router, prefix="/api")
     app.include_router(routes_user.router, prefix="/api")
+    app.include_router(routes_tasks.router, prefix="/api")
     return app
 
 

@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.api.deps import get_provider
+from app.api.routes_tasks import get_task_runner
 from app.core.config import get_settings
 from app.core.rate_limit import limiter
 from app.db.session import get_db
@@ -31,6 +32,7 @@ from app.main import app
 from app.models import Base, Product
 from app.providers import MockProvider
 from app.seed import seed_catalog
+from app.services.tasks import TaskRunner
 
 TEST_DB_URL = os.environ["DATABASE_URL"]
 IS_SQLITE = TEST_DB_URL.startswith("sqlite")
@@ -91,6 +93,8 @@ def client(SessionLocal: sessionmaker[Session]) -> Iterator[TestClient]:
 
     app.dependency_overrides[get_db] = _get_db
     app.dependency_overrides[get_provider] = lambda: MockProvider()
+    # Background task runs use the test database and never sleep between retries.
+    app.dependency_overrides[get_task_runner] = lambda: TaskRunner(SessionLocal, get_settings(), sleep=lambda _s: None)
     limiter.reset()
     with TestClient(app) as c:
         yield c

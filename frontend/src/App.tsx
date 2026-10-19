@@ -15,6 +15,7 @@ import { ComparePage } from "./pages/ComparePage";
 import { HomePage } from "./pages/HomePage";
 import { OrdersPage } from "./pages/OrdersPage";
 import { PreferencesPage } from "./pages/PreferencesPage";
+import { TasksPage } from "./pages/TasksPage";
 import { ProductPage } from "./pages/ProductPage";
 
 function NotFound() {
@@ -43,6 +44,7 @@ export function AppRoutes() {
         <Route path="checkout" element={<RequireAuth><CheckoutPage /></RequireAuth>} />
         <Route path="orders" element={<RequireAuth><OrdersPage /></RequireAuth>} />
         <Route path="preferences" element={<RequireAuth><PreferencesPage /></RequireAuth>} />
+        <Route path="tasks" element={<RequireAuth><TasksPage /></RequireAuth>} />
         <Route path="*" element={<NotFound />} />
       </Route>
     </Routes>

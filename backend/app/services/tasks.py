@@ -1,0 +1,515 @@
+"""Persistent agent tasks: planning, leased execution, retries, cancellation and resume.
+
+A task is a server-planned sequence of steps. Each step calls a read-only tool from the Phase 1
+registry (or the built-in, deterministic "summarize" step). Every state change is committed
+immediately, so a crash loses at most the step in flight:
+
+* **Leases.** A runner claims a task (`locked_by`, `locked_until`) under a row lock. A task whose
+  lease has expired was interrupted (restart, deploy, crash) and can be resumed.
+* **No duplicated work.** Finished steps (`succeeded`, `skipped`) are never executed again; their
+  stored output is reused. A step's arguments are frozen when it first starts, so a resumed step
+  replays exactly the same call. Attempts are recorded before each call.
+* **Retries.** Transient tool failures (`temporarily_unavailable`) are retried with exponential
+  backoff up to the step's `max_attempts`. If they keep failing the task fails as *retryable* and
+  can be resumed; permanent failures are not retryable.
+* **Approval gating.** Steps come only from the server-side planner, never from the client, and the
+  runner allows the "read" permission only. Phase 2 has no step that changes a cart or places an
+  order; such steps will have to go through the existing pending-action approval flow.
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+import uuid
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.orm import Session, sessionmaker
+
+from app.agents.tool_registry import RETRYABLE_CODES, ToolContext, ToolRegistry, build_read_only_registry
+from app.core.config import Settings
+from app.core.errors import ConflictError, NotFoundError, RateLimited, ValidationFailed
+from app.models import AgentTask, AgentTaskStep
+from app.models.task import FINISHED_STEP_STATUSES, TERMINAL_TASK_STATUSES
+from app.services.specs import CATEGORY_LABELS, format_inr
+
+logger = logging.getLogger("agentcart.tasks")
+
+TaskKind = Literal["product_research"]
+ACTIVE_STATUSES = ("queued", "running")
+SUMMARIZE = "summarize"  # built-in step, not a registry tool
+
+
+def _now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _aware(dt: datetime | None) -> datetime | None:
+    return dt.replace(tzinfo=UTC) if dt is not None and dt.tzinfo is None else dt
+
+
+# ------------------------------------------------------------------ task kinds and planning
+class ProductResearchInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    query: str | None = Field(default=None, min_length=1, max_length=120)
+    category: str | None = None
+    max_price_inr: int | None = Field(default=None, ge=1, le=10_000_000)
+    min_rating: float | None = Field(default=None, ge=0, le=5)
+    in_stock: bool = True
+    compare_top: int = Field(default=3, ge=2, le=4)
+    include_cart: bool = True
+
+    @field_validator("category")
+    @classmethod
+    def _known_category(cls, v: str | None) -> str | None:
+        if v is not None and v not in CATEGORY_LABELS:
+            raise ValueError("unknown category")
+        return v
+
+    @model_validator(mode="after")
+    def _needs_a_subject(self) -> ProductResearchInput:
+        if self.query is None and self.category is None:
+            raise ValueError("give a query or a category")
+        return self
+
+
+INPUT_MODELS: dict[str, type[BaseModel]] = {"product_research": ProductResearchInput}
+
+
+@dataclass(frozen=True)
+class PlannedStep:
+    name: str
+    tool: str
+
+
+def plan_steps(kind: str, inp: BaseModel) -> list[PlannedStep]:
+    """Server-side plan. Clients can choose the task kind and its typed input, never the steps."""
+    if kind == "product_research":
+        assert isinstance(inp, ProductResearchInput)
+        steps = [PlannedStep("search", "search_catalog"), PlannedStep("compare", "compare_products")]
+        if inp.include_cart:
+            steps.append(PlannedStep("cart", "read_cart"))
+        steps.append(PlannedStep("summarize", SUMMARIZE))
+        return steps
+    raise ValidationFailed("Unknown task kind")
+
+
+def goal_for(kind: str, inp: BaseModel) -> str:
+    assert isinstance(inp, ProductResearchInput)
+    subject = CATEGORY_LABELS.get(inp.category or "", "").lower() or "products"
+    parts = [f"Research {subject}"]
+    if inp.query:
+        parts.append(f"matching “{inp.query}”")
+    if inp.max_price_inr is not None:
+        parts.append(f"under {format_inr(inp.max_price_inr)}")
+    return " ".join(parts)[:300]
+
+
+def validate_input(kind: str, raw: Any) -> BaseModel:
+    model = INPUT_MODELS.get(kind)
+    if model is None:
+        raise ValidationFailed("Unknown task kind")
+    if not isinstance(raw, dict):
+        raise ValidationFailed("Task input must be an object")
+    try:
+        return model.model_validate(raw)
+    except ValidationError as exc:
+        errors = [
+            {"loc": [str(p) for p in e["loc"]], "msg": e["msg"]}
+            for e in exc.errors(include_url=False, include_input=False, include_context=False)
+        ]
+        raise ValidationFailed("Invalid task input", details={"errors": errors}) from exc
+
+
+# ------------------------------------------------------------------ queries and API-facing operations
+def get_owned(db: Session, user_id: int, task_id: str) -> AgentTask:
+    task = db.get(AgentTask, task_id)
+    if task is None or task.user_id != user_id:
+        raise NotFoundError("Task not found")  # never reveal another user's task
+    return task
+
+
+def list_tasks(db: Session, user_id: int, limit: int = 50) -> list[AgentTask]:
+    stmt = select(AgentTask).where(AgentTask.user_id == user_id).order_by(AgentTask.created_at.desc()).limit(limit)
+    return list(db.scalars(stmt))
+
+
+def is_interrupted(task: AgentTask, now: datetime | None = None) -> bool:
+    """Running, but nobody holds a live lease: the runner died mid-task."""
+    until = _aware(task.locked_until)
+    return task.status == "running" and (until is None or until <= (now or _now()))
+
+
+def is_resumable(task: AgentTask, now: datetime | None = None) -> bool:
+    if task.status == "queued":
+        return True
+    if is_interrupted(task, now):
+        return True
+    return task.status == "failed" and bool((task.error or {}).get("retryable"))
+
+
+def create_task(
+    db: Session, user_id: int, kind: str, raw_input: Any, idempotency_key: str | None, settings: Settings
+) -> tuple[AgentTask, bool]:
+    """Returns (task, created). Re-sending the same idempotency key returns the original task."""
+    inp = validate_input(kind, raw_input)
+    normalised = inp.model_dump(mode="json")
+    if idempotency_key:
+        existing = db.scalar(
+            select(AgentTask).where(AgentTask.user_id == user_id, AgentTask.idempotency_key == idempotency_key)
+        )
+        if existing is not None:
+            if existing.kind != kind or existing.input != normalised:
+                raise ConflictError("This idempotency key was already used for a different task")
+            return existing, False
+    active = db.scalar(
+        select(func.count())
+        .select_from(AgentTask)
+        .where(AgentTask.user_id == user_id, AgentTask.status.in_(ACTIVE_STATUSES))
+    )
+    if (active or 0) >= settings.task_max_active_per_user:
+        raise RateLimited(
+            f"You already have {active} active tasks. Wait for one to finish or cancel one.",
+            details={"active": active, "limit": settings.task_max_active_per_user},
+        )
+    plan = plan_steps(kind, inp)
+    task = AgentTask(
+        id=str(uuid.uuid4()),
+        user_id=user_id,
+        kind=kind,
+        goal=goal_for(kind, inp),
+        input=normalised,
+        status="queued",
+        progress=0,
+        current_step=0,
+        total_steps=len(plan),
+        idempotency_key=idempotency_key,
+    )
+    task.steps = [
+        AgentTaskStep(position=i, name=s.name, tool=s.tool, max_attempts=settings.task_step_max_attempts)
+        for i, s in enumerate(plan)
+    ]
+    db.add(task)
+    try:
+        db.commit()
+    except IntegrityError:
+        # Two requests with the same key raced; the other one won.
+        db.rollback()
+        if idempotency_key:
+            return create_task(db, user_id, kind, raw_input, idempotency_key, settings)
+        raise
+    return task, True
+
+
+def request_cancel(db: Session, user_id: int, task_id: str) -> AgentTask:
+    task = get_owned(db, user_id, task_id)
+    if task.status in TERMINAL_TASK_STATUSES:
+        raise ConflictError(f"This task is already {task.status}", details={"status": task.status})
+    task.cancel_requested = True
+    if task.status == "queued" or is_interrupted(task):
+        # Nobody is executing it: cancel right away.
+        _finish_cancelled(task)
+    # Otherwise the live runner stops at the next step boundary.
+    db.commit()
+    return task
+
+
+def prepare_resume(db: Session, user_id: int, task_id: str) -> AgentTask:
+    task = get_owned(db, user_id, task_id)
+    if task.cancel_requested or not is_resumable(task):
+        reason = "running" if task.status == "running" else task.status
+        raise ConflictError("This task can't be resumed", details={"status": task.status, "reason": reason})
+    if task.status == "failed":
+        for step in task.steps:
+            if step.status == "failed":
+                step.status, step.attempts, step.error = "queued", 0, None
+        task.status, task.error, task.finished_at = "queued", None, None
+    elif is_interrupted(task):
+        task.status, task.locked_by, task.locked_until = "queued", None, None
+    db.commit()
+    return task
+
+
+def _finish_cancelled(task: AgentTask) -> None:
+    now = _now()
+    for step in task.steps:
+        if step.status not in FINISHED_STEP_STATUSES and step.status != "failed":
+            step.status = "cancelled"
+            step.finished_at = step.finished_at or now
+    task.status = "cancelled"
+    task.locked_by = task.locked_until = None
+    task.finished_at = now
+
+
+# ------------------------------------------------------------------ execution
+StepOutcome = tuple[bool, dict[str, Any] | None, dict[str, Any] | None]  # ok, output, error
+
+
+class _LeaseLost(Exception):
+    """This runner's lease expired and another runner claimed the task."""
+
+
+class TaskRunner:
+    """Executes tasks. One runner call drives one task until it finishes, fails, is cancelled, or
+    loses its lease. Safe to call again on the same task: it only claims a task that nobody holds."""
+
+    def __init__(
+        self,
+        session_factory: sessionmaker[Session],
+        settings: Settings,
+        registry_factory: Callable[[], ToolRegistry] = build_read_only_registry,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self.session_factory = session_factory
+        self.settings = settings
+        self.registry_factory = registry_factory
+        self.sleep = sleep
+
+    def run(self, task_id: str) -> str | None:
+        """Returns the task's status when this runner let go of it, or None if it couldn't claim it."""
+        runner_id = str(uuid.uuid4())
+        try:
+            with self.session_factory() as db:
+                task = self._claim(db, task_id, runner_id)
+                if task is None:
+                    return None
+                try:
+                    return self._drive(db, task, runner_id)
+                except _LeaseLost:
+                    # Another runner owns the task now: stop without writing anything.
+                    db.rollback()
+                    logger.warning("task %s: lease lost during a retry, stopping", task_id)
+                    return None
+        except OperationalError:
+            # The database itself is unavailable: the lease expires and the task becomes resumable.
+            logger.warning("task %s interrupted by a database failure", task_id, exc_info=True)
+            return "interrupted"
+        except Exception:
+            logger.exception("task %s runner crashed", task_id)
+            self._mark_crashed(task_id, runner_id)
+            return "failed"
+
+    # -- lease handling
+    def _lease_until(self) -> datetime:
+        return _now() + timedelta(seconds=self.settings.task_lease_seconds)
+
+    def _claim(self, db: Session, task_id: str, runner_id: str) -> AgentTask | None:
+        task = db.get(AgentTask, task_id, with_for_update=True)
+        if task is None or task.status not in ACTIVE_STATUSES:
+            db.rollback()
+            return None
+        held = _aware(task.locked_until)
+        if task.locked_by is not None and held is not None and held > _now():
+            db.rollback()  # someone else is running it
+            return None
+        if task.cancel_requested:
+            _finish_cancelled(task)
+            db.commit()
+            return None
+        task.locked_by, task.locked_until = runner_id, self._lease_until()
+        task.status = "running"
+        task.attempt += 1
+        task.started_at = task.started_at or _now()
+        task.error = None
+        db.commit()
+        return task
+
+    def _still_ours(self, db: Session, task: AgentTask, runner_id: str) -> bool:
+        """Re-read the task under a row lock; renew the lease if we still hold it."""
+        db.refresh(task, with_for_update=True)
+        if task.locked_by != runner_id:
+            db.rollback()
+            return False
+        task.locked_until = self._lease_until()
+        return True
+
+    # -- the loop
+    def _drive(self, db: Session, task: AgentTask, runner_id: str) -> str:
+        registry = self.registry_factory()
+        outputs = {s.name: s.output for s in task.steps if s.status == "succeeded"}
+        for step in task.steps:
+            if not self._still_ours(db, task, runner_id):
+                logger.warning("task %s: lease lost, stopping", task.id)
+                return task.status
+            if task.cancel_requested:
+                _finish_cancelled(task)
+                db.commit()
+                return "cancelled"
+            if step.status in FINISHED_STEP_STATUSES:
+                continue  # done in an earlier run: never repeated
+            if step.args is None:
+                resolved = _resolve_args(step, task.input, outputs)
+                if resolved is None:
+                    step.status, step.output = "skipped", {"reason": _skip_reason(step, task.input, outputs)}
+                    step.finished_at = _now()
+                    self._advance(task, step)
+                    db.commit()
+                    continue
+                step.args = resolved
+            ok, output, error = self._run_step_with_retries(db, task, step, registry, outputs, runner_id)
+            if not ok:
+                assert error is not None
+                return self._fail(db, task, step, error)
+            outputs[step.name] = output
+        task.result = outputs.get("summarize") or {}
+        task.status, task.progress = "succeeded", 100
+        task.current_step = task.total_steps
+        task.locked_by = task.locked_until = None
+        task.finished_at = _now()
+        db.commit()
+        return "succeeded"
+
+    def _run_step_with_retries(
+        self,
+        db: Session,
+        task: AgentTask,
+        step: AgentTaskStep,
+        registry: ToolRegistry,
+        outputs: dict[str, dict[str, Any] | None],
+        runner_id: str,
+    ) -> StepOutcome:
+        while True:
+            step.status = "running"
+            step.attempts += 1  # recorded before the call: a crash mid-call still counts
+            step.started_at = step.started_at or _now()
+            task.locked_until = self._lease_until()
+            db.commit()
+            ok, output, error = self._execute(db, task, step, registry, outputs)
+            if ok:
+                step.status, step.output, step.error = "succeeded", output, None
+                step.finished_at = _now()
+                self._advance(task, step)
+                db.commit()
+                return ok, output, None
+            assert error is not None
+            step.error = error
+            if error.get("retryable") and step.attempts < step.max_attempts:
+                step.status = "queued"
+                db.commit()
+                self.sleep(self.settings.task_retry_backoff_seconds * 2 ** (step.attempts - 1))
+                if not self._still_ours(db, task, runner_id):
+                    raise _LeaseLost
+                continue
+            return False, None, error
+
+    def _execute(
+        self,
+        db: Session,
+        task: AgentTask,
+        step: AgentTaskStep,
+        registry: ToolRegistry,
+        outputs: dict[str, dict[str, Any] | None],
+    ) -> StepOutcome:
+        if step.tool == SUMMARIZE:
+            return True, _summarize(task.input, outputs), None
+        ctx = ToolContext(db=db, settings=self.settings, user_id=task.user_id, allowed_permissions=frozenset({"read"}))
+        result = registry.execute(step.tool, step.args or {}, ctx)
+        if result.ok:
+            return True, result.data, None
+        assert result.error is not None
+        return (
+            False,
+            None,
+            {
+                "code": result.error.code,
+                "message": result.error.message,
+                "retryable": result.error.code in RETRYABLE_CODES,
+            },
+        )
+
+    def _advance(self, task: AgentTask, step: AgentTaskStep) -> None:
+        task.current_step = step.position + 1
+        task.progress = min(99, round(100 * task.current_step / max(1, task.total_steps)))
+
+    def _fail(self, db: Session, task: AgentTask, step: AgentTaskStep, error: dict[str, Any]) -> str:
+        step.status, step.error = "failed", error
+        step.finished_at = _now()
+        task.status = "failed"
+        task.error = {**error, "step": step.name}
+        task.locked_by = task.locked_until = None
+        task.finished_at = _now()
+        db.commit()
+        return "failed"
+
+    def _mark_crashed(self, task_id: str, runner_id: str) -> None:
+        try:
+            with self.session_factory() as db:
+                task = db.get(AgentTask, task_id, with_for_update=True)
+                if task is not None and task.locked_by == runner_id:
+                    task.status = "failed"
+                    task.error = {
+                        "code": "internal_error",
+                        "message": "The task failed unexpectedly",
+                        "retryable": True,
+                    }
+                    task.locked_by = task.locked_until = None
+                    task.finished_at = _now()
+                    db.commit()
+        except Exception:
+            logger.exception("could not record crash of task %s", task_id)
+
+
+# ------------------------------------------------------------------ product_research step logic
+def _resolve_args(
+    step: AgentTaskStep, inp: dict[str, Any], outputs: dict[str, dict[str, Any] | None]
+) -> dict[str, Any] | None:
+    """Arguments for a step, or None when the step should be skipped."""
+    if step.name == "search":
+        args: dict[str, Any] = {
+            "in_stock": inp.get("in_stock", True),
+            "sort": "relevance" if inp.get("query") else "rating",
+            "page_size": 12,
+        }
+        for src, dst in (
+            ("query", "query"),
+            ("category", "category"),
+            ("max_price_inr", "max_price_inr"),
+            ("min_rating", "min_rating"),
+        ):
+            if inp.get(src) is not None:
+                args[dst] = inp[src]
+        return args
+    if step.name == "compare":
+        items = (outputs.get("search") or {}).get("items") or []
+        ids = [p["id"] for p in items[: int(inp.get("compare_top", 3))]]
+        return {"product_ids": ids} if len(ids) >= 2 else None
+    if step.name in ("cart", "summarize"):
+        return {}
+    raise ValidationFailed(f"Unknown step {step.name!r}")
+
+
+def _skip_reason(step: AgentTaskStep, inp: dict[str, Any], outputs: dict[str, dict[str, Any] | None]) -> str:
+    if step.name == "compare":
+        n = len((outputs.get("search") or {}).get("items") or [])
+        return f"Only {n} matching product{'s' if n != 1 else ''}; nothing to compare"
+    return "Not needed"
+
+
+def _summarize(inp: dict[str, Any], outputs: dict[str, dict[str, Any] | None]) -> dict[str, Any]:
+    """Deterministic summary built only from stored step outputs (no LLM, no new data)."""
+    search = outputs.get("search") or {}
+    items = search.get("items") or []
+    top = [
+        {k: p[k] for k in ("id", "name", "brand", "category", "price_inr", "rating", "in_stock")}
+        for p in items[: int(inp.get("compare_top", 3))]
+    ]
+    summary: dict[str, Any] = {"matches": int(search.get("total") or 0), "top": top, "best": {}}
+    comparison = outputs.get("compare")
+    if comparison:
+        names = [c["name"] for c in comparison.get("columns", [])]
+        for row in comparison.get("rows", []):
+            if row.get("key") in ("price_inr", "rating") and row.get("best"):
+                summary["best"][row["key"]] = [names[i] for i in row["best"] if i < len(names)]
+    cart = outputs.get("cart")
+    if cart is not None:
+        summary["cart"] = {"item_count": cart.get("item_count", 0), "total_inr": cart.get("total_inr", 0)}
+    cap = inp.get("max_price_inr")
+    summary["all_within_budget"] = cap is None or all(p["price_inr"] <= cap for p in top)
+    return summary

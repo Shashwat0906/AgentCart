@@ -276,3 +276,78 @@ export interface PublicConfig {
   shipping_fee_inr: number;
   payment_mode: "demo";
 }
+
+// ------------------------------------------------------------------ persistent agent tasks
+export type TaskStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled" | "awaiting_approval";
+export type TaskStepStatus = "queued" | "running" | "succeeded" | "failed" | "skipped" | "cancelled";
+
+export interface ProductResearchInput {
+  query?: string;
+  category?: string;
+  max_price_inr?: number;
+  min_rating?: number;
+  in_stock?: boolean;
+  compare_top?: number;
+  include_cart?: boolean;
+}
+
+export interface TaskError {
+  code: string;
+  message: string;
+  retryable: boolean;
+  step?: string;
+}
+
+export interface TaskStep {
+  position: number;
+  name: string;
+  tool: string;
+  status: TaskStepStatus;
+  attempts: number;
+  max_attempts: number;
+  args: Record<string, unknown> | null;
+  output: Record<string, unknown> | null;
+  error: TaskError | null;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export interface ResearchProduct {
+  id: number;
+  name: string;
+  brand: string;
+  category: string;
+  price_inr: number;
+  rating: number;
+  in_stock: boolean;
+}
+
+export interface ResearchResult {
+  matches: number;
+  top: ResearchProduct[];
+  best: { price_inr?: string[]; rating?: string[] };
+  cart?: { item_count: number; total_inr: number };
+  all_within_budget: boolean;
+}
+
+export interface AgentTask {
+  id: string;
+  kind: "product_research";
+  goal: string;
+  status: TaskStatus;
+  progress: number;
+  current_step: number;
+  total_steps: number;
+  input: ProductResearchInput;
+  result: ResearchResult | null;
+  error: TaskError | null;
+  cancel_requested: boolean;
+  attempt: number;
+  interrupted: boolean;
+  resumable: boolean;
+  created_at: string;
+  updated_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  steps: TaskStep[] | null;
+}

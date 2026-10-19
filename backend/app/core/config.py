@@ -72,6 +72,12 @@ class Settings(BaseSettings):
     checkout_quote_ttl_seconds: int = Field(default=600, ge=60, le=3600)
     agent_action_ttl_minutes: int = Field(default=30, ge=1, le=1440)
 
+    # --- persistent agent tasks ---
+    task_step_max_attempts: int = Field(default=3, ge=1, le=10)
+    task_retry_backoff_seconds: float = Field(default=0.5, ge=0, le=30)  # doubles per retry
+    task_lease_seconds: int = Field(default=120, ge=5, le=3600)
+    task_max_active_per_user: int = Field(default=5, ge=1, le=100)
+
     @model_validator(mode="after")
     def _secure_defaults(self) -> Settings:
         if self.jwt_secret.strip().lower() in _INSECURE_SECRETS or len(self.jwt_secret) < 32:

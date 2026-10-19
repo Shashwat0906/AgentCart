@@ -22,6 +22,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
@@ -47,7 +48,10 @@ ErrorCode = Literal[
     "write_attempted",
     "invalid_output",
     "internal_error",
+    "temporarily_unavailable",  # transient (DB connection, timeout): safe to retry
 ]
+# Error codes a caller may retry; everything else is permanent for the same input.
+RETRYABLE_CODES: frozenset[str] = frozenset({"temporarily_unavailable"})
 _TOOL_NAME = re.compile(r"^[a-z][a-z0-9_]{2,40}$")
 
 
@@ -245,6 +249,10 @@ class ToolRegistry:
         except (ValidationFailed, AppError) as exc:
             _rollback_if_dirty(ctx.db)
             return _fail(name, "invalid_request", exc.message)
+        except (OperationalError, TimeoutError):
+            ctx.db.rollback()  # the connection may be unusable; a retry starts clean
+            logger.warning("tool %s hit a temporary failure", name, exc_info=True)
+            return _fail(name, "temporarily_unavailable", "The tool is temporarily unavailable")
         except Exception:
             _rollback_if_dirty(ctx.db)
             logger.exception("tool %s failed", name)

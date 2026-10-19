@@ -354,11 +354,13 @@ def test_audit_log_records_names_not_values(registry: ToolRegistry, db: Session)
 
 
 # ------------------------------------------------------------------ production behaviour unchanged
-def test_registry_is_not_wired_into_production_code_yet() -> None:
+def test_registry_is_used_only_by_persistent_tasks() -> None:
+    # Phase 2: the task runner executes steps through the registry. The chat agent (graph, chat
+    # service) still does not, so existing chat behaviour is unchanged.
     app_dir = pathlib.Path(__file__).resolve().parents[1] / "app"
-    users = [
+    users = sorted(
         str(p.relative_to(app_dir))
         for p in app_dir.rglob("*.py")
         if p.name != "tool_registry.py" and "tool_registry" in p.read_text(encoding="utf-8")
-    ]
-    assert users == [], users
+    )
+    assert users == ["services/tasks.py"], users
