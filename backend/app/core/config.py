@@ -77,6 +77,11 @@ class Settings(BaseSettings):
     task_retry_backoff_seconds: float = Field(default=0.5, ge=0, le=30)  # doubles per retry
     task_lease_seconds: int = Field(default=120, ge=5, le=3600)
     task_max_active_per_user: int = Field(default=5, ge=1, le=100)
+    # --- planning loop (shopping_agent tasks) ---
+    task_max_iterations: int = Field(default=8, ge=1, le=50)  # planner decisions per task, all runs
+    task_max_tool_calls: int = Field(default=12, ge=1, le=100)  # executed tool calls per task, all runs
+    task_max_invalid_decisions: int = Field(default=2, ge=0, le=20)  # rejected decisions tolerated
+    task_deadline_seconds: float = Field(default=60.0, gt=0, le=600)  # wall-clock budget per run
 
     @model_validator(mode="after")
     def _secure_defaults(self) -> Settings:

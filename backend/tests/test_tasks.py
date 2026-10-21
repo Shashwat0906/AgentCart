@@ -149,9 +149,10 @@ def test_migration_0002_upgrades_downgrades_and_matches_the_models(tmp_path: pat
         assert r.returncode == 0, r.stdout + r.stderr
         return r.stdout + r.stderr
 
-    alembic("upgrade", "head")
-    assert "0002 (head)" in alembic("current")
-    assert "No new upgrade operations detected" in alembic("check")  # migration == models
+    alembic("upgrade", "0002")
+    assert "0002" in alembic("current")
+    alembic("upgrade", "head")  # later migrations (0003+) build on 0002
+    assert "No new upgrade operations detected" in alembic("check")  # migrations == models
     alembic("downgrade", "0001")
     assert "0001" in alembic("current")
     alembic("upgrade", "head")

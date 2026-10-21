@@ -105,7 +105,7 @@ A task is multi-step agent work that runs in the background and survives restart
 
 | Method | Path | Body / notes |
 |---|---|---|
-| POST | `/tasks` | `{kind: "product_research", input: {...}, idempotency_key?}`. 201 with the queued task, which then runs in the background. Re-sending the same `idempotency_key` returns the original task (200); reusing it for different input is 409. 429 when the caller already has `TASK_MAX_ACTIVE_PER_USER` queued or running tasks. Rate-limited. |
+| POST | `/tasks` | `{kind: "product_research" | "shopping_agent", input: {...}, idempotency_key?}`. 201 with the queued task, which then runs in the background. Re-sending the same `idempotency_key` returns the original task (200); reusing it for different input is 409. 429 when the caller already has `TASK_MAX_ACTIVE_PER_USER` queued or running tasks. Rate-limited. |
 | GET | `/tasks` | The caller's tasks, newest first (up to 50), without steps |
 | GET | `/tasks/{id}` | One task with its steps |
 | POST | `/tasks/{id}/cancel` | A queued or interrupted task is cancelled at once; a running one stops at the next step boundary (`cancel_requested: true`). 409 if already finished. |
@@ -125,7 +125,38 @@ A task is multi-step agent work that runs in the background and survives restart
 
 Steps: `search` (`search_catalog`) → `compare` (`compare_products`; skipped when fewer than 2 products match) → `cart` (`read_cart`, optional) → `summarize` (built in, deterministic). The result has `matches`, `top`, `best` (lowest price / best rated), `cart` and `all_within_budget`.
 
-Task fields: `status` (`queued` · `running` · `succeeded` · `failed` · `cancelled`), `progress` (0–100), `current_step`, `total_steps`, `result`, `error` (`{code, message, retryable, step}`), `cancel_requested`, `attempt` (runs started), `interrupted` (running but its runner's lease expired), `stalled` (queued, but nothing has happened for longer than `TASK_LEASE_SECONDS`, so its scheduled run was lost), `resumable`, and timestamps. Step fields: `status` (`queued` · `running` · `succeeded` · `failed` · `skipped` · `cancelled`), `attempts`, `max_attempts`, `args` (frozen when the step first runs), `output`, `error`.
+`shopping_agent` input (strict). The server plans the steps one decision at a time:
+
+| Field | Type | Default |
+|---|---|---|
+| `goal` | string, 3–500 (e.g. "a wireless mouse under ₹3,000") | required |
+| `budget_max_inr` | integer ≥ 1; can only lower the budget found in `goal` | — |
+| `category` | one of the catalogue categories; replaces the category found in `goal` | — |
+| `allow_proposals` | boolean; reserved for approval-gated cart proposals (not offered yet) | `false` |
+
+How it runs: the goal's category, budget and hard requirements are parsed deterministically. Then a bounded loop asks the planner (offline, rule-based by default; no API key) for one decision at a time: call a read-only tool, give a final answer, or ask a clarifying question. Every decision is checked **before** it runs:
+* the tool must be one offered to the task (read-only tools only);
+* the arguments must match the tool's schema;
+* a final answer may only name products that `evaluate_constraints` passed.
+
+A rejected decision is kept as a `skipped` step with an `error` and is never executed. An accepted tool call is saved as a step before it runs, so a resumed task finishes that step instead of planning again.
+
+Limits:
+* `TASK_MAX_ITERATIONS`: planner decisions. Exceeding it fails with `limit_reached`.
+* `TASK_MAX_TOOL_CALLS`: executed tool calls. Exceeding it fails with `limit_reached`.
+* `TASK_MAX_INVALID_DECISIONS`: rejected decisions allowed. Going over it fails with `invalid_decisions`.
+* `TASK_DEADLINE_SECONDS`: time per run. Exceeding it fails with `deadline_exceeded`, which is retryable: resuming gets a fresh time budget.
+
+A planner exception fails the task with `planner_error`, and no details are exposed.
+
+The last step is the built-in `final` or `clarify`. The result has:
+* `type`: `recommendations`, `no_match` or `clarification`;
+* `products`: catalogue facts for eligible products only;
+* `question`, `notes`, `requirements`, `candidates`, `eligible`, and `cart`.
+
+Run again is offered only for `product_research` tasks.
+
+Task fields: `status` (`queued` · `running` · `succeeded` · `failed` · `cancelled`), `progress` (0–100), `current_step`, `total_steps`, `result`, `error` (`{code, message, retryable, step}`), `cancel_requested`, `attempt` (runs started), `interrupted` (running but its runner's lease expired), `stalled` (queued, but nothing has happened for longer than `TASK_LEASE_SECONDS`, so its scheduled run was lost), `resumable`, and timestamps. Step fields: `status` (`queued` · `running` · `succeeded` · `failed` · `skipped` · `cancelled`), `attempts`, `max_attempts`, `args` (frozen when the step first runs), `output`, `error`. `shopping_agent` additions: the task's `state` (`planner`, `iterations`, `tool_calls`, `invalid_decisions`, `runs`, `deadline_at`) and each step's `decision` (`planner`, `iteration`, `kind`, `rationale`, `rejected`). Both are `null` for `product_research`.
 
 Controls shown on the Tasks page (the server re-checks every action):
 

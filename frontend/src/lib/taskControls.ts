@@ -2,7 +2,7 @@ import type { AgentTask, ProductResearchInput, TaskStatus } from "./types";
 
 export const TASK_POLL_MS = 1500;
 
-type TaskState = Pick<AgentTask, "status" | "interrupted" | "stalled" | "resumable" | "cancel_requested">;
+type TaskState = Pick<AgentTask, "kind" | "status" | "interrupted" | "stalled" | "resumable" | "cancel_requested">;
 
 /** Something is actually progressing on the server, so its status can change by itself. Interrupted
  *  and stalled tasks won't change until the user resumes or cancels them, so they are not polled. */
@@ -28,7 +28,8 @@ export function taskControls(t: TaskState): TaskControls {
   return {
     cancel: pending && !t.cancel_requested,
     resume: t.resumable && !t.cancel_requested,
-    runAgain: FINISHED.includes(t.status),
+    // Run again re-sends a research form; agent tasks get their own controls in a later stage.
+    runAgain: t.kind === "product_research" && FINISHED.includes(t.status),
   };
 }
 

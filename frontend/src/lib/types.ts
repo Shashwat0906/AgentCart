@@ -308,8 +308,18 @@ export interface TaskStep {
   args: Record<string, unknown> | null;
   output: Record<string, unknown> | null;
   error: TaskError | null;
+  /** Planner metadata for `shopping_agent` steps (null for fixed-plan tasks). */
+  decision?: TaskDecision | null;
   started_at: string | null;
   finished_at: string | null;
+}
+
+export interface TaskDecision {
+  planner: string;
+  iteration: number;
+  kind: "tool" | "final" | "clarify";
+  rationale: string;
+  rejected?: boolean;
 }
 
 export interface ResearchProduct {
@@ -330,16 +340,13 @@ export interface ResearchResult {
   all_within_budget: boolean;
 }
 
-export interface AgentTask {
+interface TaskBase {
   id: string;
-  kind: "product_research";
   goal: string;
   status: TaskStatus;
   progress: number;
   current_step: number;
   total_steps: number;
-  input: ProductResearchInput;
-  result: ResearchResult | null;
   error: TaskError | null;
   cancel_requested: boolean;
   attempt: number;
@@ -352,4 +359,39 @@ export interface AgentTask {
   started_at: string | null;
   finished_at: string | null;
   steps: TaskStep[] | null;
+  /** Planning-loop counters (`shopping_agent` only). */
+  state?: Record<string, unknown> | null;
 }
+
+export interface ProductResearchTask extends TaskBase {
+  kind: "product_research";
+  input: ProductResearchInput;
+  result: ResearchResult | null;
+}
+
+export interface ShoppingAgentInput {
+  goal: string;
+  budget_max_inr?: number | null;
+  category?: string | null;
+  allow_proposals?: boolean;
+}
+
+/** Result of a `shopping_agent` task, built only from tool outputs. */
+export interface ShoppingAgentResult {
+  type: "recommendations" | "no_match" | "clarification";
+  question: string | null;
+  products: ResearchProduct[];
+  notes: string;
+  requirements: string[];
+  candidates: number;
+  eligible: number;
+  cart?: { item_count: number; total_inr: number };
+}
+
+export interface ShoppingAgentTask extends TaskBase {
+  kind: "shopping_agent";
+  input: ShoppingAgentInput;
+  result: ShoppingAgentResult | null;
+}
+
+export type AgentTask = ProductResearchTask | ShoppingAgentTask;
