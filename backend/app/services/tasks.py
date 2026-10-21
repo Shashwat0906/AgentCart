@@ -565,6 +565,11 @@ class TaskRunner:
                     # Never surface planner internals (or a provider's message) to the user.
                     logger.exception("task %s: planner %s failed", task.id, planner.name)
                     return self._stop_loop(db, task, "planner_error", "The planner failed to decide a next step", False)
+                clamped: list[str] = []
+                if isinstance(decision, ToolCall) and decision.tool == "search_catalog":
+                    # held to the task's category, budget and stock before it is validated or run
+                    bounded, clamped = _bounded_search(dict(decision.args), constraints)
+                    decision = decision.model_copy(update={"args": bounded})
                 problem = check_decision(decision, pstate, tools) or _argument_problem(decision, registry)
                 if problem is not None:
                     self._record_rejected(db, task, decision, problem, planner.name)
@@ -579,7 +584,7 @@ class TaskRunner:
                     return self._stop_loop(
                         db, task, "limit_reached", f"Stopped after {s.task_max_tool_calls} tool calls", False
                     )
-                pending = self._append_step(db, task, decision, planner.name)
+                pending = self._append_step(db, task, decision, planner.name, clamped)
             ok, _output, error = self._run_step_with_retries(
                 db, task, pending, registry, {}, runner_id, constraints=constraints, permissions=permissions
             )
@@ -622,7 +627,9 @@ class TaskRunner:
             "rationale": decision.rationale if isinstance(decision, ToolCall) else "",
         }
 
-    def _append_step(self, db: Session, task: AgentTask, decision: ToolCall, planner: str) -> AgentTaskStep:
+    def _append_step(
+        self, db: Session, task: AgentTask, decision: ToolCall, planner: str, clamped: list[str] | None = None
+    ) -> AgentTaskStep:
         """Persist the decision as a queued step and commit before executing it."""
         step = AgentTaskStep(
             position=len(task.steps),
@@ -632,7 +639,7 @@ class TaskRunner:
             status="queued",
             attempts=0,
             max_attempts=self.settings.task_step_max_attempts,
-            decision=self._decision_record(task, decision, planner),
+            decision={**self._decision_record(task, decision, planner), **({"clamped": clamped} if clamped else {})},
         )
         task.steps.append(step)
         task.total_steps = len(task.steps)
@@ -880,7 +887,28 @@ _REJECTION_MESSAGES = {
     "invalid_arguments": "The planner's arguments don't match the tool's schema",
     "ungrounded_final": "The planner named products that no constraint check passed",
     "ungrounded_proposal": "The planner proposed a product that no constraint check passed",
+    "invented_quantity": "The planner proposed a quantity you didn't ask for",
 }
+
+
+def _bounded_search(args: dict[str, Any], constraints: TaskConstraints) -> tuple[dict[str, Any], list[str]]:
+    """Search arguments held to the task's own requirements: its category, budget and in-stock rule.
+
+    Eligibility never depends on this (evaluate_constraints and the propose tool re-check everything); it
+    keeps any planner, including a model, from searching outside the task. Returns the arguments and the
+    names of the ones that were changed."""
+    out: dict[str, Any] = dict(args)
+    changed: list[str] = []
+    if constraints.category is not None and out.get("category") != constraints.category:
+        out["category"], changed = constraints.category, [*changed, "category"]
+    if out.get("in_stock") is not True:
+        out["in_stock"], changed = True, [*changed, "in_stock"]
+    cap, floor = constraints.budget_max, constraints.budget_min
+    if cap is not None and (out.get("max_price_inr") is None or out["max_price_inr"] > cap):
+        out["max_price_inr"], changed = cap, [*changed, "max_price_inr"]
+    if floor is not None and (out.get("min_price_inr") is None or out["min_price_inr"] < floor):
+        out["min_price_inr"], changed = floor, [*changed, "min_price_inr"]
+    return out, changed
 
 
 def _argument_problem(decision: ToolCall | Final | Clarify, registry: ToolRegistry) -> str | None:
