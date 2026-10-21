@@ -116,7 +116,8 @@ def derive_intent(goal: AgentGoal, *, max_item_quantity: int) -> tuple[ShoppingI
     """Deterministic intent (category, budget, hard constraints) and any blocking questions.
 
     Uses the same sanitising, parsing and validation as the chat agent. An explicit budget can only
-    lower the budget found in the text; an explicit category replaces the parsed one.
+    lower the budget found in the text; an explicit category replaces the parsed one. A cart quantity above
+    `max_item_quantity` (when the task may propose) is a blocking question, asked before any research.
     """
     intent = RequestParser().parse(sanitize_user_text(goal.goal))
     if goal.category is not None:
@@ -125,7 +126,22 @@ def derive_intent(goal: AgentGoal, *, max_item_quantity: int) -> tuple[ShoppingI
         cap = goal.budget_max_inr if intent.budget_max is None else min(intent.budget_max, goal.budget_max_inr)
         intent = intent.model_copy(update={"budget_max": cap})
     result = validate_intent(intent, max_item_quantity=max_item_quantity)
-    return result.intent, [dict(q) for q in result.questions]
+    questions = [dict(q) for q in result.questions]
+    it = result.intent
+    if goal.allow_proposals and it.wants_cart_add and it.cart_quantity > max_item_quantity:
+        # Ask before any research: a proposal for more than the per-product limit would be refused anyway.
+        # The quantity is never capped silently.
+        questions.append(
+            {
+                "id": "quantity",
+                "question": (
+                    f"You asked for {it.cart_quantity}, but at most {max_item_quantity} units of one product can be "
+                    f"added to a cart. How many would you like (1–{max_item_quantity})?"
+                ),
+                "options": [],
+            }
+        )
+    return it, questions
 
 
 # ------------------------------------------------------------------ state and the constraint-check contract
