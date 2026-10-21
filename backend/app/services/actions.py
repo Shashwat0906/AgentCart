@@ -154,6 +154,7 @@ def _execute_add_to_cart(db: Session, user_id: int, action: AgentAction, setting
             settings,
         )[0]
         fresh.conversation_id = action.conversation_id
+        fresh.task_id = action.task_id  # still the task's proposal; the step link stays with the original
         db.commit()
         raise ConflictError(
             f"The price of {product.name} changed from {format_inr(expected)} to {format_inr(product.price_inr)}. "
@@ -198,6 +199,7 @@ def action_view(a: AgentAction) -> dict[str, Any]:
         "payload": a.payload,
         "result": a.result or {},
         "conversation_id": a.conversation_id,
+        "task_id": a.task_id,
         "created_at": a.created_at,
         "expires_at": a.expires_at,
         "decided_at": a.decided_at,

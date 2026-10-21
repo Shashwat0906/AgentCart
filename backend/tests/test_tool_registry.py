@@ -82,7 +82,7 @@ def test_register_rejects_duplicates_bad_names_and_write_permissions() -> None:
                 handler=lambda c, i: {},
             )
         )
-    for perm in ("propose", "execute", "write"):
+    for perm in ("execute", "write"):  # nothing may change state directly; "propose" is allowed since S4
         bad = ToolSpec(
             name="mutate_cart",
             description="x",
@@ -93,6 +93,15 @@ def test_register_rejects_duplicates_bad_names_and_write_permissions() -> None:
         )
         with pytest.raises(ValueError, match="not allowed in this phase"):
             reg.register(bad)
+    proposer = ToolSpec(
+        name="propose_something",
+        description="x",
+        input_model=ReadCartInput,
+        output_model=ProductPage,
+        handler=lambda c, i: {},
+        permission="propose",
+    )
+    reg.register(proposer)  # approval-gated proposals only (see test_agent_proposals.py for the write guard)
 
 
 # ------------------------------------------------------------------ input validation

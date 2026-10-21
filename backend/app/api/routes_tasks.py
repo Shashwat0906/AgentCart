@@ -12,6 +12,7 @@ from app.core.config import Settings, get_settings
 from app.db.session import get_db, get_sessionmaker
 from app.models import AgentTask, User
 from app.schemas import TaskCreateIn, TaskOut
+from app.services import actions as action_service
 from app.services import tasks as task_service
 
 router = APIRouter(tags=["tasks"])
@@ -41,6 +42,7 @@ def task_view(task: AgentTask, settings: Settings, *, with_steps: bool = True) -
         "stalled": task_service.is_stalled(task, stale_after_seconds=stale_after),
         "resumable": task_service.is_resumable(task, stale_after_seconds=stale_after) and not task.cancel_requested,
         "state": task.state,
+        "proposals": [action_service.action_view(a) for a in task.proposals],
         "created_at": task.created_at,
         "updated_at": task.updated_at,
         "started_at": task.started_at,

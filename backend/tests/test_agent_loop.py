@@ -172,7 +172,11 @@ def test_agent_task_asks_a_question_without_calling_tools(client: TestClient) ->
     assert t["result"]["products"] == [] and t["state"]["tool_calls"] == 0
 
 
-def test_agent_task_never_proposes_cart_changes_in_s3(client: TestClient, SessionLocal: sessionmaker[Session]) -> None:
+def test_agent_task_proposes_but_never_changes_the_cart(
+    client: TestClient, SessionLocal: sessionmaker[Session]
+) -> None:
+    """S4 replaces the S3 rule "never proposes": an opted-in task may create one *pending* proposal, and
+    the cart still never changes without the user's approval (see test_agent_proposals.py)."""
     h = register(client)
     with SessionLocal() as s:
         before = counts(s, AgentAction, CartItem)
@@ -183,9 +187,11 @@ def test_agent_task_never_proposes_cart_changes_in_s3(client: TestClient, Sessio
             client, h, {"goal": "add a wireless mouse under ₹3,000 to my cart", "allow_proposals": True}
         ).json()["id"],
     )
-    assert t["status"] == "succeeded" and "propose_add_to_cart" not in {s["tool"] for s in t["steps"]}
+    assert t["status"] == "succeeded" and "propose_add_to_cart" in {s["tool"] for s in t["steps"]}
+    assert [p["status"] for p in t["proposals"]] == ["pending"]
     with SessionLocal() as s:
-        assert counts(s, AgentAction, CartItem) == before
+        after = counts(s, AgentAction, CartItem)
+    assert after == {"agent_actions": before["agent_actions"] + 1, "cart_items": before["cart_items"]}
 
 
 def test_structured_inputs_only_tighten_the_goal(client: TestClient) -> None:
@@ -552,7 +558,10 @@ def test_agent_tasks_never_write_outside_their_own_tables(
     for inp in (MOUSE, NO_MATCH, {"goal": "add the best mouse to my cart", "allow_proposals": True}):
         assert fetch(client, h, start_agent(client, h, inp).json()["id"])["status"] == "succeeded"
     with SessionLocal() as s:
-        assert counts(s, *watched) == before
+        # the only new row anywhere: one pending proposal from the opted-in task (S4); cart, orders,
+        # preferences, prices and stock are untouched
+        assert counts(s, *watched) == {**before, "agent_actions": before["agent_actions"] + 1}
+        assert list(s.scalars(select(AgentAction.status))) == ["pending"]
         assert list(s.scalars(select(Product.price_inr).order_by(Product.id))) == prices
         assert list(s.scalars(select(Product.stock).order_by(Product.id))) == stock
 

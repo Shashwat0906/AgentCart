@@ -30,7 +30,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, OperationalError
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 from app.agents.guardrails import sanitize_user_text
 from app.agents.parser import RequestParser, strip_budget_phrases
@@ -52,7 +52,7 @@ from app.agents.tool_registry import (
     TaskConstraints,
     ToolContext,
     ToolRegistry,
-    build_read_only_registry,
+    build_task_registry,
 )
 from app.core.config import Settings
 from app.core.errors import ConflictError, NotFoundError, RateLimited, ValidationFailed
@@ -67,8 +67,16 @@ ACTIVE_STATUSES = ("queued", "running")
 SUMMARIZE = "summarize"  # built-in step, not a registry tool
 # Built-in, non-executable trace steps that end a planning loop.
 FINAL_STEP_TOOLS = ("final", "clarify")
-# Permissions offered to the planning loop. S3: read tools only (approval-gated proposals arrive in S4).
+# Permissions offered to the planning loop: read tools always; "propose" (pending, approval-gated cart
+# proposals) only when the user opted in with `allow_proposals`. There is no permission that changes the cart.
 LOOP_PERMISSIONS: frozenset[str] = frozenset({"read"})
+READ_ONLY: frozenset[str] = frozenset({"read"})
+
+
+def loop_permissions(goal: AgentGoal, settings: Settings) -> frozenset[str]:
+    if goal.allow_proposals and settings.task_max_proposals > 0:
+        return LOOP_PERMISSIONS | {"propose"}
+    return LOOP_PERMISSIONS
 
 
 def _now() -> datetime:
@@ -176,7 +184,13 @@ def get_owned(db: Session, user_id: int, task_id: str) -> AgentTask:
 
 
 def list_tasks(db: Session, user_id: int, limit: int = 50) -> list[AgentTask]:
-    stmt = select(AgentTask).where(AgentTask.user_id == user_id).order_by(AgentTask.created_at.desc()).limit(limit)
+    stmt = (
+        select(AgentTask)
+        .where(AgentTask.user_id == user_id)
+        .options(selectinload(AgentTask.proposals))  # one query for every listed task's proposals
+        .order_by(AgentTask.created_at.desc())
+        .limit(limit)
+    )
     return list(db.scalars(stmt))
 
 
@@ -316,7 +330,7 @@ class TaskRunner:
         self,
         session_factory: sessionmaker[Session],
         settings: Settings,
-        registry_factory: Callable[[], ToolRegistry] = build_read_only_registry,
+        registry_factory: Callable[[], ToolRegistry] = build_task_registry,
         sleep: Callable[[float], None] = time.sleep,
         planner_factory: Callable[[], Planner] = RuleBasedPlanner,
         clock: Callable[[], datetime] = _now,
@@ -433,6 +447,7 @@ class TaskRunner:
         outputs: dict[str, dict[str, Any] | None],
         runner_id: str,
         constraints: TaskConstraints | None = None,
+        permissions: frozenset[str] = READ_ONLY,
     ) -> StepOutcome:
         while True:
             step.status = "running"
@@ -440,7 +455,7 @@ class TaskRunner:
             step.started_at = step.started_at or _now()
             task.locked_until = self._lease_until()
             db.commit()
-            ok, output, error = self._execute(db, task, step, registry, outputs, constraints)
+            ok, output, error = self._execute(db, task, step, registry, outputs, constraints, permissions)
             if ok:
                 step.status, step.output, step.error = "succeeded", output, None
                 step.finished_at = _now()
@@ -466,6 +481,7 @@ class TaskRunner:
         registry: ToolRegistry,
         outputs: dict[str, dict[str, Any] | None],
         constraints: TaskConstraints | None = None,
+        permissions: frozenset[str] = READ_ONLY,
     ) -> StepOutcome:
         if step.tool == SUMMARIZE:
             return True, _summarize(task.input, outputs), None
@@ -473,8 +489,10 @@ class TaskRunner:
             db=db,
             settings=self.settings,
             user_id=task.user_id,
-            allowed_permissions=frozenset({"read"}),
+            allowed_permissions=permissions,  # read only, unless this agent task opted in to proposals
             constraints=constraints,  # the task's own requirements; never from step arguments
+            task_id=task.id,  # a proposal is tied to this step: a resumed step can't propose twice
+            task_step_id=step.id,
         )
         result = registry.execute(step.tool, step.args or {}, ctx)
         if result.ok:
@@ -502,12 +520,13 @@ class TaskRunner:
         s = self.settings
         registry = self.registry_factory()
         planner = self.planner_factory()
+        goal = AgentGoal.model_validate(task.input)
+        permissions = loop_permissions(goal, s)
         tools = [
             spec.schema()
             for name in registry.names()
-            if (spec := registry.get(name)) is not None and spec.permission in LOOP_PERMISSIONS
+            if (spec := registry.get(name)) is not None and spec.permission in permissions
         ]
-        goal = AgentGoal.model_validate(task.input)
         intent, questions = derive_intent(goal, max_item_quantity=s.max_item_quantity)
         constraints = TaskConstraints.from_intent(intent)
         deadline = self.clock() + timedelta(seconds=s.task_deadline_seconds)
@@ -562,7 +581,7 @@ class TaskRunner:
                     )
                 pending = self._append_step(db, task, decision, planner.name)
             ok, _output, error = self._run_step_with_retries(
-                db, task, pending, registry, {}, runner_id, constraints=constraints
+                db, task, pending, registry, {}, runner_id, constraints=constraints, permissions=permissions
             )
             if not ok:
                 assert error is not None
@@ -928,4 +947,11 @@ def _compose_result(
     cart = _latest_data(observations, "read_cart")
     if cart is not None:
         result["cart"] = {"item_count": cart.get("item_count", 0), "total_inr": cart.get("total_inr", 0)}
+    # Pending cart proposals, as proposed. Their live status (approved, rejected, expired …) is the task's
+    # `proposals` in the API; nothing is added to the cart until the user approves one.
+    result["proposals"] = [
+        {k: o.data[k] for k in ("action_id", "product_id", "product_name", "quantity", "unit_price_inr", "summary")}
+        for o in observations
+        if o.tool == "propose_add_to_cart" and o.ok and o.data
+    ]
     return result

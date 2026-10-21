@@ -141,6 +141,7 @@ class ActionOut(Model):
     payload: dict[str, Any]
     result: dict[str, Any]
     conversation_id: str | None
+    task_id: str | None = None  # set when an agent task proposed it (S4)
     created_at: datetime
     expires_at: datetime
     decided_at: datetime | None
@@ -286,6 +287,7 @@ class TaskOut(Model):
     stalled: bool
     resumable: bool
     state: dict[str, Any] | None = None  # planning-loop counters (shopping_agent)
+    proposals: list[ActionOut] = Field(default_factory=list)  # cart proposals and their live status (S4)
     created_at: datetime
     updated_at: datetime
     started_at: datetime | None
