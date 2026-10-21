@@ -542,6 +542,13 @@ class TaskRunner:
         state["deadline_at"] = deadline.isoformat()  # per run; the counters are totals across runs
         task.state = state
         db.commit()
+        bind = getattr(planner, "bind_run", None)
+        if callable(bind):  # a model-backed planner: same validation as the loop, and this run's time budget
+            remaining = max(0.0, (deadline - self.clock()).total_seconds())
+            bind(
+                vet=lambda d, st: _vet(d, st, tools, registry, constraints)[2],
+                deadline=time.monotonic() + remaining,
+            )
 
         while True:
             if not self._still_ours(db, task, runner_id):
@@ -565,21 +572,21 @@ class TaskRunner:
                     # Never surface planner internals (or a provider's message) to the user.
                     logger.exception("task %s: planner %s failed", task.id, planner.name)
                     return self._stop_loop(db, task, "planner_error", "The planner failed to decide a next step", False)
-                problem = check_decision(decision, pstate, tools) or _argument_problem(decision, registry)
+                decision, clamped, problem = _vet(decision, pstate, tools, registry, constraints)
                 if problem is not None:
-                    self._record_rejected(db, task, decision, problem, planner.name)
+                    self._record_rejected(db, task, decision, problem, planner)
                     if self._state_int(task, "invalid_decisions") > s.task_max_invalid_decisions:
                         return self._stop_loop(
                             db, task, "invalid_decisions", "The planner kept proposing invalid steps", False
                         )
                     continue
                 if not isinstance(decision, ToolCall):
-                    return self._finish_loop(db, task, decision, observations, constraints, planner.name)
+                    return self._finish_loop(db, task, decision, observations, constraints, planner)
                 if self._state_int(task, "tool_calls") >= s.task_max_tool_calls:
                     return self._stop_loop(
                         db, task, "limit_reached", f"Stopped after {s.task_max_tool_calls} tool calls", False
                     )
-                pending = self._append_step(db, task, decision, planner.name)
+                pending = self._append_step(db, task, decision, planner, clamped)
             ok, _output, error = self._run_step_with_retries(
                 db, task, pending, registry, {}, runner_id, constraints=constraints, permissions=permissions
             )
@@ -614,15 +621,21 @@ class TaskRunner:
         iterations = self._state_int(task, "iterations")
         task.progress = min(99, round(100 * iterations / max(1, self.settings.task_max_iterations)))
 
-    def _decision_record(self, task: AgentTask, decision: ToolCall | Final | Clarify, planner: str) -> dict[str, Any]:
+    def _decision_record(
+        self, task: AgentTask, decision: ToolCall | Final | Clarify, planner: Planner
+    ) -> dict[str, Any]:
+        meta = getattr(planner, "last_meta", None)  # e.g. {"source": "llm"} or {"source": "rule_based", "fallback": …}
         return {
-            "planner": planner,
+            **(dict(meta) if isinstance(meta, dict) else {}),
+            "planner": planner.name,
             "iteration": self._state_int(task, "iterations"),
             "kind": decision.kind,
             "rationale": decision.rationale if isinstance(decision, ToolCall) else "",
         }
 
-    def _append_step(self, db: Session, task: AgentTask, decision: ToolCall, planner: str) -> AgentTaskStep:
+    def _append_step(
+        self, db: Session, task: AgentTask, decision: ToolCall, planner: Planner, clamped: list[str] | None = None
+    ) -> AgentTaskStep:
         """Persist the decision as a queued step and commit before executing it."""
         step = AgentTaskStep(
             position=len(task.steps),
@@ -632,7 +645,7 @@ class TaskRunner:
             status="queued",
             attempts=0,
             max_attempts=self.settings.task_step_max_attempts,
-            decision=self._decision_record(task, decision, planner),
+            decision={**self._decision_record(task, decision, planner), **({"clamped": clamped} if clamped else {})},
         )
         task.steps.append(step)
         task.total_steps = len(task.steps)
@@ -641,7 +654,7 @@ class TaskRunner:
         return step
 
     def _record_rejected(
-        self, db: Session, task: AgentTask, decision: ToolCall | Final | Clarify, code: str, planner: str
+        self, db: Session, task: AgentTask, decision: ToolCall | Final | Clarify, code: str, planner: Planner
     ) -> None:
         """Keep a refused decision in the trace as a finished (`skipped`) step: never executed, never resumed."""
         self._count(task, "invalid_decisions")
@@ -672,7 +685,7 @@ class TaskRunner:
         decision: Final | Clarify,
         observations: tuple[Observation, ...],
         constraints: TaskConstraints,
-        planner: str,
+        planner: Planner,
     ) -> str:
         result = _compose_result(decision, observations, constraints)
         now = _now()
@@ -880,7 +893,44 @@ _REJECTION_MESSAGES = {
     "invalid_arguments": "The planner's arguments don't match the tool's schema",
     "ungrounded_final": "The planner named products that no constraint check passed",
     "ungrounded_proposal": "The planner proposed a product that no constraint check passed",
+    "invented_quantity": "The planner proposed a quantity you didn't ask for",
 }
+
+
+def _vet(
+    decision: ToolCall | Final | Clarify,
+    state: PlannerState,
+    tools: list[dict[str, Any]],
+    registry: ToolRegistry,
+    constraints: TaskConstraints,
+) -> tuple[ToolCall | Final | Clarify, list[str], str | None]:
+    """The one validation every decision passes, whichever planner made it: search bounds applied, then the
+    decision guard (offered tool, grounding, quantity), then the tool's own argument schema."""
+    clamped: list[str] = []
+    if isinstance(decision, ToolCall) and decision.tool == "search_catalog":
+        bounded, clamped = _bounded_search(dict(decision.args), constraints)
+        decision = decision.model_copy(update={"args": bounded})
+    return decision, clamped, check_decision(decision, state, tools) or _argument_problem(decision, registry)
+
+
+def _bounded_search(args: dict[str, Any], constraints: TaskConstraints) -> tuple[dict[str, Any], list[str]]:
+    """Search arguments held to the task's own requirements: its category, budget and in-stock rule.
+
+    Eligibility never depends on this (evaluate_constraints and the propose tool re-check everything); it
+    keeps any planner, including a model, from searching outside the task. Returns the arguments and the
+    names of the ones that were changed."""
+    out: dict[str, Any] = dict(args)
+    changed: list[str] = []
+    if constraints.category is not None and out.get("category") != constraints.category:
+        out["category"], changed = constraints.category, [*changed, "category"]
+    if out.get("in_stock") is not True:
+        out["in_stock"], changed = True, [*changed, "in_stock"]
+    cap, floor = constraints.budget_max, constraints.budget_min
+    if cap is not None and (out.get("max_price_inr") is None or out["max_price_inr"] > cap):
+        out["max_price_inr"], changed = cap, [*changed, "max_price_inr"]
+    if floor is not None and (out.get("min_price_inr") is None or out["min_price_inr"] < floor):
+        out["min_price_inr"], changed = floor, [*changed, "min_price_inr"]
+    return out, changed
 
 
 def _argument_problem(decision: ToolCall | Final | Clarify, registry: ToolRegistry) -> str | None:

@@ -364,3 +364,28 @@ def test_rule_based_planner_runs_with_no_api_keys(monkeypatch: pytest.MonkeyPatc
         monkeypatch.delenv(var, raising=False)
     decisions, _ = drive(db, state_for("wireless mouse under ₹3,000"), tools=tools_without("read_cart"))
     assert isinstance(decisions[-1], Final)
+
+
+def test_check_decision_rejects_quantities_the_user_did_not_ask_for() -> None:
+    """S5: the quantity comes from the goal, deterministically; no planner (or model) may choose another."""
+    one = _evaluated(
+        state_for("add a wireless mouse under ₹3,000 to my cart", allow_proposals=True), passing=[5], failing=[]
+    )
+    assert one.intent.cart_quantity == 1
+
+    def propose(q: int | None) -> ToolCall:
+        return ToolCall(
+            tool="propose_add_to_cart", args={"product_id": 5, **({"quantity": q} if q is not None else {})}
+        )
+
+    assert check_decision(propose(1), one, ALL_TOOLS) is None
+    assert check_decision(propose(None), one, ALL_TOOLS) is None  # the tool's default is 1
+    for q in (0, 2, 5, 10, 100):
+        assert check_decision(propose(q), one, ALL_TOOLS) == "invented_quantity", q
+    two = _evaluated(
+        state_for("add 2 wireless mice under ₹3,000 to my cart", allow_proposals=True), passing=[5], failing=[]
+    )
+    assert two.intent.cart_quantity == 2
+    assert check_decision(propose(2), two, ALL_TOOLS) is None
+    assert check_decision(propose(1), two, ALL_TOOLS) == "invented_quantity"
+    assert check_decision(propose(None), two, ALL_TOOLS) == "invented_quantity"
