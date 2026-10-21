@@ -123,6 +123,8 @@ A task is multi-step agent work that runs in the background and survives restart
 | `compare_top` | integer 2–4 | `3` |
 | `include_cart` | boolean | `true` |
 
+A budget written in `query` ("laptop under ₹60,000", "below 60k", "between 40,000 and 60,000") is read by the same deterministic parser as chat: it becomes a price limit that can only lower `max_price_inr` (a typed minimum such as "above ₹60,000" is enforced too, and one above `max_price_inr` is rejected with 422 instead of being dropped), and it is removed from the search keywords (every keyword must match a product). The stored `input` keeps the text as typed.
+
 Steps: `search` (`search_catalog`) → `compare` (`compare_products`; skipped when fewer than 2 products match) → `cart` (`read_cart`, optional) → `summarize` (built in, deterministic). The result has `matches`, `top`, `best` (lowest price / best rated), `cart` and `all_within_budget`.
 
 `shopping_agent` input (strict). The server plans the steps one decision at a time:

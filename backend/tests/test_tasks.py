@@ -182,6 +182,114 @@ def test_product_research_task_runs_to_completion(client: TestClient) -> None:
     assert t["started_at"] and t["finished_at"] and t["attempt"] == 1 and t["error"] is None
 
 
+def laptops_under(client: TestClient, cap: int) -> list[int]:
+    """Ground truth from the catalogue API: in-stock laptops at or under `cap`."""
+    params = {"category": "laptops", "max_price": cap, "in_stock": "true"}
+    return sorted(p["id"] for p in client.get("/api/products", params=params).json()["items"])
+
+
+def test_laptop_research_under_60k_finds_the_seeded_laptops(client: TestClient) -> None:
+    """Regression: a ₹60,000 laptop research task must report the catalogue's matching laptops."""
+    h = register(client)
+    truth = laptops_under(client, 60_000)
+    assert len(truth) == 7  # seeded catalogue
+    t = fetch(client, h, start(client, h, {"category": "laptops", "max_price_inr": 60_000}).json()["id"])
+    assert t["status"] == "succeeded" and t["result"]["matches"] == len(truth)
+    assert all(p["category"] == "laptops" and p["price_inr"] <= 60_000 for p in t["result"]["top"])
+    assert t["result"]["all_within_budget"] is True
+
+
+@pytest.mark.parametrize(
+    "inp",
+    [
+        {"query": "laptop under 60000"},
+        {"query": "laptop under 60000", "max_price_inr": 60_000},
+        {"query": "laptops under ₹60,000", "category": "laptops"},
+        {"query": "laptop below 60k", "max_price_inr": 60_000},
+        {"query": "Laptop for Rs 60,000"},
+    ],
+)
+def test_a_budget_typed_into_the_query_is_a_price_limit_not_keywords(client: TestClient, inp: dict[str, Any]) -> None:
+    """Every query word must match, so "under 60000" used to be searched for as text and found nothing
+    (0 matches) although 7 laptops cost at most ₹60,000."""
+    h = register(client)
+    t = fetch(client, h, start(client, h, inp).json()["id"])
+    assert t["status"] == "succeeded"
+    search_args = t["steps"][0]["args"]
+    assert search_args["query"].lower() in ("laptop", "laptops") and search_args["max_price_inr"] == 60_000
+    assert t["result"]["matches"] == len(laptops_under(client, 60_000)) == 7
+    assert all(p["price_inr"] <= 60_000 for p in t["result"]["top"]) and t["result"]["all_within_budget"]
+    assert t["input"]["query"] == inp["query"]  # the task keeps what the user typed
+
+
+def test_a_typed_budget_only_narrows_the_explicit_maximum(client: TestClient) -> None:
+    h = register(client)
+    lower = fetch(client, h, start(client, h, {"query": "laptop under 40000", "max_price_inr": 60_000}).json()["id"])
+    assert lower["steps"][0]["args"]["max_price_inr"] == 40_000
+    assert lower["result"]["matches"] == len(laptops_under(client, 40_000))
+    higher = fetch(client, h, start(client, h, {"query": "laptop under 90000", "max_price_inr": 60_000}).json()["id"])
+    assert higher["steps"][0]["args"]["max_price_inr"] == 60_000  # never widened
+    assert higher["result"]["matches"] == 7
+
+
+def test_a_typed_minimum_price_is_enforced(client: TestClient) -> None:
+    h = register(client)
+    t = fetch(client, h, start(client, h, {"query": "laptop above 60000"}).json()["id"])
+    args = t["steps"][0]["args"]
+    assert args["query"] == "laptop" and args["min_price_inr"] == 60_000 and "max_price_inr" not in args
+    truth = client.get("/api/products", params={"category": "laptops", "min_price": 60_000, "in_stock": "true"}).json()
+    assert t["result"]["matches"] == truth["total"] > 0
+    assert all(p["price_inr"] >= 60_000 for p in t["result"]["top"]) and t["result"]["all_within_budget"] is True
+
+
+def test_a_typed_budget_that_conflicts_with_the_maximum_price_is_rejected(
+    client: TestClient, SessionLocal: sessionmaker[Session]
+) -> None:
+    """ "above ₹60,000" with a ₹50,000 maximum can't both hold: reject it instead of dropping a limit
+    and listing laptops the user excluded."""
+    h = register(client)
+    r = start(client, h, {"query": "laptop above 60000", "max_price_inr": 50_000})
+    assert r.status_code == 422 and "conflicts with the maximum price" in r.json()["error"]["message"]
+    with SessionLocal() as s:
+        assert counts(s, AgentTask)["agent_tasks"] == 0
+    # a range inside the maximum is fine and both ends are enforced
+    t = fetch(
+        client, h, start(client, h, {"query": "laptop between 40000 and 60000", "max_price_inr": 50_000}).json()["id"]
+    )
+    args = t["steps"][0]["args"]
+    assert (args["min_price_inr"], args["max_price_inr"]) == (40_000, 50_000)
+    assert all(40_000 <= p["price_inr"] <= 50_000 for p in t["result"]["top"])
+
+
+def test_summary_budget_check_includes_a_typed_minimum() -> None:
+    top = [
+        {
+            "id": 1,
+            "name": "a",
+            "brand": "b",
+            "category": "laptops",
+            "price_inr": 45_000,
+            "rating": 4.0,
+            "in_stock": True,
+        }
+    ]
+    inp = {"query": "laptop above 60000", "compare_top": 3}
+    summary = task_service._summarize(inp, {"search": {"items": top, "total": 1}})
+    assert summary["all_within_budget"] is False
+
+
+def test_queries_without_a_budget_are_searched_unchanged(client: TestClient) -> None:
+    h = register(client)
+    for inp in (
+        {"query": "gaming laptop", "category": "laptops"},
+        {"query": "noise cancelling"},
+        {"query": "4k monitor"},
+    ):
+        t = fetch(client, h, start(client, h, inp).json()["id"])
+        args = t["steps"][0]["args"]
+        assert args["query"] == inp["query"] and "max_price_inr" not in args and "min_price_inr" not in args
+
+
 def test_compare_is_skipped_when_fewer_than_two_products_match(client: TestClient) -> None:
     h = register(client)
     t = fetch(client, h, start(client, h, {"category": "laptops", "max_price_inr": 30_000}).json()["id"])

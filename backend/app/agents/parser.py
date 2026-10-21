@@ -235,6 +235,39 @@ def _parse_money_token(token: str) -> int | None:
     return _amount(m.group(1), m.group(2)) if m else None
 
 
+_NEGATED_CUE = re.compile(r"\b(nothing|not|no|never)\s+$", re.I)
+
+
+def strip_budget_phrases(text: str) -> str:
+    """`text` without the price expressions `RequestParser` reads as a budget, cue words included, so
+    the rest can be used as search keywords: "laptop under ₹60,000" -> "laptop". Uses the same patterns
+    and rules as the parser's budget step (ranges, currency or suffix or cue, "4K" is a resolution)."""
+    low = text.lower()
+    spans: list[tuple[int, int]] = []
+    for rng in _RANGE.finditer(low):
+        if rng.group("between") or any(re.search(r"₹|rs|k\b|lakh|lac", t) for t in (rng.group("a"), rng.group("b"))):
+            spans.append((rng.start(), rng.end()))
+    for m in MONEY.finditer(low):
+        if any(s <= m.start() < e for s, e in spans):
+            continue
+        cur, suf = m.group("cur"), m.group("suf")
+        before = low[max(0, m.start() - 30) : m.start()]
+        cue = _MAX_CUES.search(before) or _MIN_CUES.search(before)
+        value = _amount(m.group("num"), suf)
+        if not (cur or suf or (cue and value >= 500)) or value < 100:
+            continue
+        if (suf or "").lower() == "k" and not cur and not cue and m.group("num") in {"2", "4", "5", "8"}:
+            continue
+        start = m.start() - (len(before) - cue.start()) if cue else m.start()
+        if neg := _NEGATED_CUE.search(low[max(0, start - 12) : start]):
+            start -= len(neg.group(0))
+        spans.append((start, m.end()))
+    out = text
+    for s, e in sorted(spans, reverse=True):
+        out = f"{out[:s]} {out[e:]}"
+    return " ".join(out.split())
+
+
 # --------------------------------------------------------------------------- parser
 
 

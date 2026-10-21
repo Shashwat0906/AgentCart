@@ -32,6 +32,8 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.agents.guardrails import sanitize_user_text
+from app.agents.parser import RequestParser, strip_budget_phrases
 from app.agents.planner import (
     AgentGoal,
     Clarify,
@@ -146,13 +148,23 @@ def validate_input(kind: str, raw: Any) -> BaseModel:
     if not isinstance(raw, dict):
         raise ValidationFailed("Task input must be an object")
     try:
-        return model.model_validate(raw)
+        inp = model.model_validate(raw)
     except ValidationError as exc:
         errors = [
             {"loc": [str(p) for p in e["loc"]], "msg": e["msg"]}
             for e in exc.errors(include_url=False, include_input=False, include_context=False)
         ]
         raise ValidationFailed("Invalid task input", details={"errors": errors}) from exc
+    if isinstance(inp, ProductResearchInput):
+        terms = _research_terms(inp.model_dump())
+        floor, cap = terms["min_price_inr"], terms["max_price_inr"]
+        if floor is not None and cap is not None and floor > cap:
+            # Never drop either limit silently: nothing can satisfy both.
+            raise ValidationFailed(
+                "The price in “Looking for” conflicts with the maximum price",
+                details={"errors": [{"loc": ["query"], "msg": "minimum price is above the maximum price"}]},
+            )
+    return inp
 
 
 # ------------------------------------------------------------------ queries and API-facing operations
@@ -714,19 +726,18 @@ def _resolve_args(
 ) -> dict[str, Any] | None:
     """Arguments for a step, or None when the step should be skipped."""
     if step.name == "search":
+        terms = _research_terms(inp)
         args: dict[str, Any] = {
             "in_stock": inp.get("in_stock", True),
-            "sort": "relevance" if inp.get("query") else "rating",
+            "sort": "relevance" if terms["query"] else "rating",
             "page_size": 12,
         }
-        for src, dst in (
-            ("query", "query"),
-            ("category", "category"),
-            ("max_price_inr", "max_price_inr"),
-            ("min_rating", "min_rating"),
-        ):
-            if inp.get(src) is not None:
-                args[dst] = inp[src]
+        for key in ("query", "min_price_inr", "max_price_inr"):
+            if terms[key] is not None:
+                args[key] = terms[key]
+        for key in ("category", "min_rating"):
+            if inp.get(key) is not None:
+                args[key] = inp[key]
         return args
     if step.name == "compare":
         items = (outputs.get("search") or {}).get("items") or []
@@ -735,6 +746,25 @@ def _resolve_args(
     if step.name in ("cart", "summarize"):
         return {}
     raise ValidationFailed(f"Unknown step {step.name!r}")
+
+
+def _research_terms(inp: dict[str, Any]) -> dict[str, Any]:
+    """Search keywords and price bounds for a research task.
+
+    A budget typed into the query ("laptop under ₹60,000") is read by the deterministic parser, as in
+    chat, instead of being searched for as words: every keyword must match, and no product text contains
+    "under 60000". A parsed budget can only narrow an explicit `max_price_inr`, never widen it, and both
+    limits are kept as typed: a minimum above the maximum is rejected when the task is created.
+    """
+    query, cap = inp.get("query"), inp.get("max_price_inr")
+    floor: int | None = None
+    if query:
+        intent = RequestParser().parse(sanitize_user_text(query))
+        if intent.budget_max is not None:
+            cap = intent.budget_max if cap is None else min(cap, intent.budget_max)
+        floor = intent.budget_min
+        query = strip_budget_phrases(query) or None
+    return {"query": query, "min_price_inr": floor, "max_price_inr": cap}
 
 
 def _skip_reason(step: AgentTaskStep, inp: dict[str, Any], outputs: dict[str, dict[str, Any] | None]) -> str:
@@ -762,8 +792,11 @@ def _summarize(inp: dict[str, Any], outputs: dict[str, dict[str, Any] | None]) -
     cart = outputs.get("cart")
     if cart is not None:
         summary["cart"] = {"item_count": cart.get("item_count", 0), "total_inr": cart.get("total_inr", 0)}
-    cap = inp.get("max_price_inr")
-    summary["all_within_budget"] = cap is None or all(p["price_inr"] <= cap for p in top)
+    terms = _research_terms(inp)
+    cap, floor = terms["max_price_inr"], terms["min_price_inr"]
+    summary["all_within_budget"] = all(
+        (cap is None or p["price_inr"] <= cap) and (floor is None or p["price_inr"] >= floor) for p in top
+    )
     return summary
 
 
