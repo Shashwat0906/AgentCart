@@ -153,6 +153,8 @@ export interface AgentAction {
   payload: Record<string, unknown>;
   result: Record<string, unknown>;
   conversation_id: string | null;
+  /** Set when an agent task proposed it. */
+  task_id?: string | null;
   created_at: string;
   expires_at: string;
   decided_at: string | null;
@@ -361,6 +363,8 @@ interface TaskBase {
   steps: TaskStep[] | null;
   /** Planning-loop counters (`shopping_agent` only). */
   state?: Record<string, unknown> | null;
+  /** Cart proposals this task made, with their live status. Nothing changes until the user approves one. */
+  proposals?: AgentAction[];
 }
 
 export interface ProductResearchTask extends TaskBase {

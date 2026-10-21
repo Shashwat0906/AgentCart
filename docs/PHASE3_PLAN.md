@@ -61,14 +61,32 @@ goal ─► RequestParser + validate_intent (deterministic intent and hard const
 |---|---|---|
 | S1 | ✅ Planner contracts and `RuleBasedPlanner` (`app/agents/planner.py`); 51 tests | `f96704f`, PR #14 |
 | S2 | ✅ `evaluate_constraints` read tool (registry), requirements taken from `ToolContext.constraints`; 40 tests | PR #14 |
-| S3 | ✅ Migration `0003` and the planning loop for `shopping_agent` tasks (`TaskRunner._drive_loop`), read tools only; 33 tests | PR (this branch) |
-| S4–S6 | Not started | — |
+| S3 | ✅ Migration `0003` and the planning loop for `shopping_agent` tasks (`TaskRunner._drive_loop`), read tools only; 33 tests | PR #15 |
+| S4 | ✅ Migration `0004`, approval-gated `propose_add_to_cart`, the approval race fix, and proposals on the Tasks page | PR (branch `phase3/s4-approval-proposals`) |
+| S5–S6 | Not started | — |
 
 ### Notes from S2
 
 * `evaluate_constraints` reuses `ranking.evaluate` (the same check that filters recommendations) and the existing violation wording via the new public `ranking.violation_message`. A test asserts it agrees with `filter_products` across the whole catalogue for nine goals.
 * The tool's arguments are product ids only. Category, hard constraints (budget included) and stock come from the task. An unknown attribute counts as a failure.
 * Known cosmetic limitation (existing wording, unchanged): an attribute the product's category doesn't define is shown by its raw name, e.g. `ram gb unknown (you required RAM ≥ 16 GB)` for a mouse.
+
+### Notes from S4
+
+* **Migration `0004`** (owner-approved design, batch mode): adds `agent_actions.task_id` and `agent_actions.task_step_id`.
+  * `task_id`: nullable, indexed, foreign key to `agent_tasks` with `ON DELETE SET NULL`.
+  * `task_step_id`: nullable, **unique**, foreign key to `agent_task_steps` with `ON DELETE SET NULL`.
+  * Tested on SQLite and PostgreSQL: existing rows are kept, downgrade keeps every action, and re-upgrade plus `alembic check` are clean.
+* **Approval race fixed.** `approve` and `reject` now lock the action row before checking its status. Previously, two concurrent approvals could both add to the cart on PostgreSQL, and a racing reject could relabel an executed action. There is a PostgreSQL test for both cases.
+* **Proposals are idempotent per step.** The tool returns the step's existing proposal. The database's unique step link backs this up, and the proposal is committed together with the step's success.
+* **The registry write guard** lets a propose tool create new pending `AgentAction` rows only. Anything else is rolled back as `write_attempted`.
+* **S3 tests updated for S4.** Three S3 tests pinned "no proposals" (the registry refusing `propose`, the loop never proposing, no new `agent_actions` rows). They now assert the S4 rule instead: `propose` registers but `execute` and `write` don't; an opted-in task creates exactly one pending action; the cart is never changed.
+* **Mutation checks:** removing any of these makes a test fail:
+  * the write guard, per-step reuse, the eligibility re-check, the stock and quantity checks, or the per-task cap;
+  * opt-in gating, or read-only permission for research steps;
+  * the task link on re-proposals.
+
+  Removing the eager loading of proposals only affects performance, as expected.
 
 ### Notes from S3
 

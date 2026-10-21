@@ -292,4 +292,38 @@ describe("Task controls", () => {
     expect(within(card).queryByRole("button", { name: "Run again" })).not.toBeInTheDocument();
     expect(within(card).getByRole("button", { name: "Show steps" })).toBeInTheDocument();
   });
+
+  it("shows an agent task's cart proposal and approves it only through the approval API", async () => {
+    const proposal = {
+      id: "act-1", kind: "add_to_cart" as const, status: "pending" as const,
+      summary: "Add 1 × Logi M185 (₹799 each) to your cart",
+      payload: { product_id: 41, quantity: 1, expected_price_inr: 799, product_name: "Logi M185" }, result: {},
+      conversation_id: null, task_id: "a1", created_at: "2026-10-19T10:00:00Z",
+      expires_at: "2026-10-19T10:30:00Z", decided_at: null,
+    };
+    const agent: ShoppingAgentTask = {
+      ...task(), id: "a1", kind: "shopping_agent", goal: "Agent: add a wireless mouse under ₹3,000 to my cart",
+      input: { goal: "add a wireless mouse under ₹3,000 to my cart", allow_proposals: true },
+      current_step: 6, total_steps: 6, result: null, proposals: [proposal],
+    };
+    const fetchMock = mockFetch((url) => {
+      if (url.endsWith("/tasks")) return { body: [agent] };
+      if (url.endsWith("/categories")) return { body: CATEGORIES };
+      if (url.endsWith("/actions/act-1/approve")) {
+        return { body: { action: { ...proposal, status: "executed" }, cart: { items: [], item_count: 1, subtotal_inr: 799, shipping_inr: 0, total_inr: 799, problems: [] } } };
+      }
+      return undefined;
+    });
+    renderWithProviders(<TasksPage />);
+    const card = await screen.findByTestId("task-card");
+    const proposals = within(card).getByTestId("task-proposals");
+    expect(within(proposals).getByText("Add 1 × Logi M185 (₹799 each) to your cart")).toBeInTheDocument();
+    expect(within(proposals).getByTestId("action-status")).toHaveTextContent("Waiting for your approval");
+    expect(bodies(fetchMock, "/approve")).toHaveLength(0); // nothing is approved by showing it
+
+    await userEvent.click(within(proposals).getByRole("button", { name: "Approve" }));
+    await waitFor(() => expect(within(proposals).getByTestId("action-status")).toHaveTextContent("Approved & done"));
+    expect(bodies(fetchMock, "/actions/act-1/approve")).toHaveLength(1);
+    expect(within(card).queryByRole("button", { name: "Run again" })).not.toBeInTheDocument();
+  });
 });

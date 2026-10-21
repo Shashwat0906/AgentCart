@@ -66,7 +66,7 @@ Every cart response carries server-computed totals: `subtotal_inr`, `shipping_in
 | GET | `/conversations/{id}` | Messages with structured payloads and their actions |
 | DELETE | `/conversations/{id}` | — |
 | GET | `/actions?status=pending` | The caller's proposed actions |
-| POST | `/actions/{id}/approve` | Executes after revalidation. 409 `price_changed` returns `new_action_id`; 409 for stock problems; 410 if not pending or expired. |
+| POST | `/actions/{id}/approve` | Executes after revalidation. 409 `price_changed` returns `new_action_id`; 409 for stock problems; 410 if not pending or expired. Concurrent or repeated approve/reject requests for one action are serialised by a row lock: the first decides, the rest get 410 and change nothing. |
 | POST | `/actions/{id}/reject` | — |
 
 The assistant message `payload` contains:
@@ -134,7 +134,7 @@ Steps: `search` (`search_catalog`) → `compare` (`compare_products`; skipped wh
 | `goal` | string, 3–500 (e.g. "a wireless mouse under ₹3,000") | required |
 | `budget_max_inr` | integer ≥ 1; can only lower the budget found in `goal` | — |
 | `category` | one of the catalogue categories; replaces the category found in `goal` | — |
-| `allow_proposals` | boolean; reserved for approval-gated cart proposals (not offered yet) | `false` |
+| `allow_proposals` | boolean; lets the task *propose* adding a product to the cart (pending until you approve it) | `false` |
 
 How it runs: the goal's category, budget and hard requirements are parsed deterministically. Then a bounded loop asks the planner (offline, rule-based by default; no API key) for one decision at a time: call a read-only tool, give a final answer, or ask a clarifying question. Every decision is checked **before** it runs:
 * the tool must be one offered to the task (read-only tools only);
@@ -156,9 +156,18 @@ The last step is the built-in `final` or `clarify`. The result has:
 * `products`: catalogue facts for eligible products only;
 * `question`, `notes`, `requirements`, `candidates`, `eligible`, and `cart`.
 
+**Cart proposals (approval-gated).**
+* With `allow_proposals: true` (and `TASK_MAX_PROPOSALS` > 0), the planner may also call `propose_add_to_cart`. Its arguments are `product_id` and `quantity` only. The owner, price, task and step come from the server.
+* Before creating anything, the tool re-checks the product against the task's own requirements and checks the quantity against `MAX_ITEM_QUANTITY` and stock.
+* It creates one **pending** `add_to_cart` action, at most `TASK_MAX_PROPOSALS` (default 1) per task. The cart is not changed.
+* The task still ends `succeeded` and lists the proposal in `result.proposals`. Its live status is in the task's `proposals`.
+* Approve or reject it with `POST /actions/{id}/approve` or `/reject`. Approval re-checks price (a change creates a new proposal for the same task) and stock.
+* A proposal is tied to the step that made it (`agent_actions.task_step_id` is unique). If that step runs again after a resume or retry, it returns the same proposal (`reused: true`) instead of creating another.
+* `product_research` tasks can never propose. There is no checkout tool and no permission that changes the cart.
+
 Run again is offered only for `product_research` tasks.
 
-Task fields: `status` (`queued` · `running` · `succeeded` · `failed` · `cancelled`), `progress` (0–100), `current_step`, `total_steps`, `result`, `error` (`{code, message, retryable, step}`), `cancel_requested`, `attempt` (runs started), `interrupted` (running but its runner's lease expired), `stalled` (queued, but nothing has happened for longer than `TASK_LEASE_SECONDS`, so its scheduled run was lost), `resumable`, and timestamps. Step fields: `status` (`queued` · `running` · `succeeded` · `failed` · `skipped` · `cancelled`), `attempts`, `max_attempts`, `args` (frozen when the step first runs), `output`, `error`. `shopping_agent` additions: the task's `state` (`planner`, `iterations`, `tool_calls`, `invalid_decisions`, `runs`, `deadline_at`) and each step's `decision` (`planner`, `iteration`, `kind`, `rationale`, `rejected`). Both are `null` for `product_research`.
+Task fields: `status` (`queued` · `running` · `succeeded` · `failed` · `cancelled`), `progress` (0–100), `current_step`, `total_steps`, `result`, `error` (`{code, message, retryable, step}`), `cancel_requested`, `attempt` (runs started), `interrupted` (running but its runner's lease expired), `stalled` (queued, but nothing has happened for longer than `TASK_LEASE_SECONDS`, so its scheduled run was lost), `resumable`, and timestamps. Step fields: `status` (`queued` · `running` · `succeeded` · `failed` · `skipped` · `cancelled`), `attempts`, `max_attempts`, `args` (frozen when the step first runs), `output`, `error`. `shopping_agent` additions: the task's `state` (`planner`, `iterations`, `tool_calls`, `invalid_decisions`, `runs`, `deadline_at`) and each step's `decision` (`planner`, `iteration`, `kind`, `rationale`, `rejected`). Both are `null` for `product_research`. Every task also has `proposals`: its cart proposals as actions, with live `status`; empty for tasks that proposed nothing. Actions carry `task_id` when a task proposed them.
 
 Controls shown on the Tasks page (the server re-checks every action):
 
