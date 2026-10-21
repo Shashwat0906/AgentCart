@@ -7,10 +7,12 @@ from typing import Any
 from fastapi import APIRouter, BackgroundTasks, Depends, Response
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user, write_limit
+from app.agents.llm_planner import planner_factory
+from app.api.deps import get_current_user, get_provider, write_limit
 from app.core.config import Settings, get_settings
 from app.db.session import get_db, get_sessionmaker
 from app.models import AgentTask, User
+from app.providers import LLMProvider
 from app.schemas import TaskCreateIn, TaskOut
 from app.services import actions as action_service
 from app.services import tasks as task_service
@@ -18,9 +20,12 @@ from app.services import tasks as task_service
 router = APIRouter(tags=["tasks"])
 
 
-def get_task_runner(settings: Settings = Depends(get_settings)) -> task_service.TaskRunner:
-    """Background runner with its own sessions (the request's session is closed by then)."""
-    return task_service.TaskRunner(get_sessionmaker(), settings)
+def get_task_runner(
+    settings: Settings = Depends(get_settings), provider: LLMProvider = Depends(get_provider)
+) -> task_service.TaskRunner:
+    """Background runner with its own sessions (the request's session is closed by then). Agent tasks are
+    planned by the rule-based planner unless TASK_PLANNER=llm and a real model is configured."""
+    return task_service.TaskRunner(get_sessionmaker(), settings, planner_factory=planner_factory(settings, provider))
 
 
 def task_view(task: AgentTask, settings: Settings, *, with_steps: bool = True) -> dict[str, Any]:

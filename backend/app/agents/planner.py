@@ -219,6 +219,9 @@ def check_decision(
             eligible = state.eligible_ids() or []
             if decision.args.get("product_id") not in eligible:
                 return "ungrounded_proposal"
+            # The quantity is the user's, read deterministically from the goal; a planner can't choose it.
+            if decision.args.get("quantity", 1) != state.intent.cart_quantity:
+                return "invented_quantity"
         return None
     if isinstance(decision, Final):
         allowed = set(state.eligible_ids() or [])

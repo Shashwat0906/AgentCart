@@ -83,6 +83,9 @@ class Settings(BaseSettings):
     task_max_invalid_decisions: int = Field(default=2, ge=0, le=20)  # rejected decisions tolerated
     task_deadline_seconds: float = Field(default=60.0, gt=0, le=600)  # wall-clock budget per run
     task_max_proposals: int = Field(default=1, ge=0, le=5)  # pending cart proposals per task; 0 disables
+    # Who plans agent-task steps. "llm" is opt-in and only takes effect with a real LLM_PROVIDER; on any provider
+    # failure, timeout or invalid output a run falls back to the rule-based planner.
+    task_planner: Literal["rule_based", "llm"] = "rule_based"
 
     @model_validator(mode="after")
     def _secure_defaults(self) -> Settings:

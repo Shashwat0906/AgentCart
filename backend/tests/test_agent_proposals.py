@@ -740,3 +740,32 @@ def test_action_filters_return_only_the_callers_actions_by_effective_status(clie
     for op in ("approve", "reject"):  # and another user's action can't be decided
         assert client.post(f"/api/actions/{theirs['live']}/{op}", headers=h).status_code == 404
     assert db.get(AgentAction, theirs["live"]).status == "pending"  # type: ignore[union-attr]
+
+
+# ------------------------------------------------------------------ deterministic quantity (S5)
+def test_a_planner_cannot_invent_a_quantity(client: TestClient, SessionLocal: sessionmaker[Session]) -> None:
+    from tests.test_agent_loop import SEARCH_MICE, evaluate_found
+
+    h = register(client)
+    tid = agent_task(SessionLocal, uid(client, h), ADD_MOUSE)
+
+    def propose_five(state: PlannerState) -> Any:
+        return ToolCall(
+            tool="propose_add_to_cart", args={"product_id": (state.eligible_ids() or [0])[0], "quantity": 5}
+        )
+
+    assert (
+        runner(SessionLocal, planner=Scripted(SEARCH_MICE, evaluate_found, propose_five, Final())).run(tid)
+        == "succeeded"
+    )
+    t = fetch(client, h, tid)
+    rejected = [s for s in t["steps"] if s["status"] == "skipped"]
+    assert [(s["tool"], s["error"]["code"]) for s in rejected] == [("propose_add_to_cart", "invented_quantity")]
+    assert actions(SessionLocal) == [] and cart_lines(client, h) == []
+
+
+def test_the_goals_quantity_is_the_proposals_quantity(client: TestClient) -> None:
+    h = register(client)
+    goal = {"goal": "add 2 wireless mice under ₹3,000 to my cart", "allow_proposals": True}
+    [p] = fetch(client, h, start_agent(client, h, goal).json()["id"])["proposals"]
+    assert p["payload"]["quantity"] == 2 and p["summary"].startswith("Add 2 ×")

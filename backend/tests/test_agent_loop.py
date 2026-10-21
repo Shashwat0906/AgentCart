@@ -354,18 +354,35 @@ def test_a_final_answer_must_be_grounded_in_a_constraint_check(
 def test_planner_cannot_widen_the_budget_through_arguments(
     client: TestClient, SessionLocal: sessionmaker[Session]
 ) -> None:
-    """Search arguments are the planner's, but eligibility comes from the task's own constraints."""
+    """A planner can't widen the task through search arguments (S5: they are held to the task's category, budget
+    and stock), and eligibility never depends on the search: it comes from the task's own constraints."""
     h = register(client)
     tid = agent_task(SessionLocal, uid(client, h))
-    wide = ToolCall(tool="search_catalog", args={"category": "mice", "max_price_inr": 10_000_000, "page_size": 24})
+    wide = ToolCall(
+        tool="search_catalog",
+        args={"category": "laptops", "max_price_inr": 10_000_000, "in_stock": False, "page_size": 24},
+    )
     planner = Scripted(wide, evaluate_found, final_eligible)
     assert loop_runner(SessionLocal, planner).run(tid) == "succeeded"
     t = fetch(client, h, tid)
-    report = t["steps"][1]["output"]
-    prices = {p["id"]: p["price_inr"] for p in t["steps"][0]["output"]["items"]}
-    assert any(price > 3_000 for price in prices.values())  # the wide search did return expensive mice …
-    assert all(prices[r["product_id"]] <= 3_000 for r in report["results"] if r["passes"])  # … none passed
+    search = t["steps"][0]
+    assert search["args"]["category"] == "mice" and search["args"]["max_price_inr"] == 3_000
+    assert search["args"]["in_stock"] is True
+    assert sorted(search["decision"]["clamped"]) == ["category", "in_stock", "max_price_inr"]
+    assert search["output"]["items"] and all(
+        p["category"] == "mice" and p["price_inr"] <= 3_000 and p["in_stock"] for p in search["output"]["items"]
+    )
     assert all(p["price_inr"] <= 3_000 for p in t["result"]["products"])
+
+    # eligibility is the task's: an over-budget mouse checked directly still fails
+    tid2 = agent_task(SessionLocal, uid(client, h))
+    expensive = max(
+        client.get("/api/products", params={"category": "mice"}).json()["items"], key=lambda p: p["price_inr"]
+    )
+    check = ToolCall(tool="evaluate_constraints", args={"product_ids": [expensive["id"]]})
+    assert loop_runner(SessionLocal, Scripted(check, Final())).run(tid2) == "succeeded"
+    [result] = fetch(client, h, tid2)["steps"][0]["output"]["results"]
+    assert result["passes"] is False and any("over your budget" in v for v in result["violations"])
 
 
 def test_planner_exceptions_fail_the_task_without_leaking_details(
@@ -645,3 +662,20 @@ def test_migration_0003_is_additive_and_keeps_existing_tasks(tmp_path: pathlib.P
         _alembic(backend, env, "upgrade", "head")
         assert "No new upgrade operations detected" in _alembic(backend, env, "check")
         engine.dispose()
+
+
+def test_search_bounds_are_enforced_before_validation_and_never_change_rule_based_searches(
+    client: TestClient, SessionLocal: sessionmaker[Session]
+) -> None:
+    h = register(client)
+    # a minimum above the task's budget: once held to ₹3,000 the search is impossible, so it is refused unrun
+    tid = agent_task(SessionLocal, uid(client, h))
+    calls = Calls()
+    impossible = ToolCall(tool="search_catalog", args={"category": "mice", "min_price_inr": 5_000})
+    assert loop_runner(SessionLocal, Scripted(impossible, Final()), calls).run(tid) == "succeeded"
+    [rejected, _final] = fetch(client, h, tid)["steps"]
+    assert rejected["status"] == "skipped" and rejected["error"]["code"] == "invalid_arguments"
+    assert rejected["args"]["max_price_inr"] == 3_000 and calls.count == Counter()
+    # the rule-based planner already searches within the task: nothing is clamped
+    t = fetch(client, h, start_agent(client, h).json()["id"])
+    assert t["status"] == "succeeded" and all("clamped" not in s["decision"] for s in t["steps"])

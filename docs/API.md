@@ -156,6 +156,18 @@ The last step is the built-in `final` or `clarify`. The result has:
 * `products`: catalogue facts for eligible products only;
 * `question`, `notes`, `requirements`, `candidates`, `eligible`, and `cart`.
 
+**Search bounds and quantity (every planner).**
+* `search_catalog` arguments are held to the task's category, budget and in-stock rule before a decision is checked or run. The step's `decision.clamped` lists the keys that were changed.
+* A proposal's quantity must equal the quantity read from the goal; any other value is refused with `invented_quantity`.
+
+**Optional AI planner (`TASK_PLANNER=llm`, off by default).** It takes effect only when `LLM_PROVIDER` is a real model; with `mock`, tasks stay rule-based.
+* **What the model can do:** choose the next step only, from the offered tools.
+* **What's deterministic:** the category, budget, specs, stock, quantity and clarifying questions; the final notes are written by code; the model's rationale is replaced by a fixed label.
+* **What the model sees:** the goal is sanitised and passed as data; observations are structured fields only.
+* **How its output is checked:** strictly parsed, then validated exactly like any other decision.
+* **Fallback:** a provider error, timeout, exhausted run time, or invalid or refused output switches the rest of that run to the rule-based planner.
+* **Each step records:** `decision.source` (`llm` or `rule_based`), `decision.fallback` (the reason) and `decision.provider`.
+
 **Cart proposals (approval-gated).**
 * With `allow_proposals: true` (and `TASK_MAX_PROPOSALS` > 0), the planner may also call `propose_add_to_cart`. Its arguments are `product_id` and `quantity` only. The owner, price, task and step come from the server.
 * Before creating anything, the tool re-checks the product against the task's own requirements and checks the quantity against `MAX_ITEM_QUANTITY` and stock.

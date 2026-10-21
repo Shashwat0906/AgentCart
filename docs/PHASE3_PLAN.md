@@ -63,13 +63,38 @@ goal ─► RequestParser + validate_intent (deterministic intent and hard const
 | S2 | ✅ `evaluate_constraints` read tool (registry), requirements taken from `ToolContext.constraints`; 40 tests | PR #14 |
 | S3 | ✅ Migration `0003` and the planning loop for `shopping_agent` tasks (`TaskRunner._drive_loop`), read tools only; 33 tests | PR #15 |
 | S4 | ✅ Migration `0004`, approval-gated `propose_add_to_cart`, the approval race fix, and proposals on the Tasks page | PR (branch `phase3/s4-approval-proposals`) |
-| S5–S6 | Not started | — |
+| S5 | ✅ Deterministic quantity and search bounds for every planner; optional `LLMPlanner` (`TASK_PLANNER=llm`, off by default) with strict validation and rule-based fallback | PR (branch `phase3/s5-llm-planner`) |
+| S6 | Not started | — |
 
 ### Notes from S2
 
 * `evaluate_constraints` reuses `ranking.evaluate` (the same check that filters recommendations) and the existing violation wording via the new public `ranking.violation_message`. A test asserts it agrees with `filter_products` across the whole catalogue for nine goals.
 * The tool's arguments are product ids only. Category, hard constraints (budget included) and stock come from the task. An unknown attribute counts as a failure.
 * Known cosmetic limitation (existing wording, unchanged): an attribute the product's category doesn't define is shown by its raw name, e.g. `ram gb unknown (you required RAM ≥ 16 GB)` for a mouse.
+
+### Notes from S5
+
+* **Owner decisions (21 Oct 2026):**
+  * `TASK_PLANNER=rule_based` stays the production default;
+  * quantity and every hard constraint are enforced in code;
+  * any provider failure, timeout or invalid output falls back to rule-based for the rest of the run;
+  * no real-provider tests (offline scripted fakes only).
+* **Guards for every planner:**
+  * `check_decision` refuses `invented_quantity`;
+  * `_vet`, the single validation path, holds `search_catalog` to the task's category, budget and stock before checking. Rule-based searches are never clamped.
+* **`LLMPlanner` (`app/agents/llm_planner.py`):**
+  * Uses the existing `LLMProvider.complete_json` (bounded retries, deadline-clipped timeouts). Each call is bounded by the smaller of `LLM_TIMEOUT_SECONDS` and the run's remaining time.
+  * The model never writes user-visible text:
+    * a model `clarify` is invalid; the parser's questions go to the rule-based planner;
+    * final notes are deterministic;
+    * the rationale is a fixed label.
+* **No migration.** The step `decision` JSON already holds `source`, `fallback` and `provider`.
+* **Mutation checks:** removing any of these fails a test:
+  * pre-validation, the persistent fallback, quantity replacement, note or rationale replacement;
+  * the clarify ban, parser-only questions, selection gating, goal delimiting, structured-only observations.
+
+  The planner's own deadline pre-check is redundant, because `LLMProvider` enforces the same rule.
+* **Known behaviour:** the quantity comes from the user's own goal text. "add 10 of …" proposes quantity 10, still pending until approved and capped by `MAX_ITEM_QUANTITY`.
 
 ### Notes from S4
 
