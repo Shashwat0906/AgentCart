@@ -82,6 +82,7 @@ class Settings(BaseSettings):
     task_max_tool_calls: int = Field(default=12, ge=1, le=100)  # executed tool calls per task, all runs
     task_max_invalid_decisions: int = Field(default=2, ge=0, le=20)  # rejected decisions tolerated
     task_deadline_seconds: float = Field(default=60.0, gt=0, le=600)  # wall-clock budget per run
+    task_max_proposals: int = Field(default=1, ge=0, le=5)  # pending cart proposals per task; 0 disables
 
     @model_validator(mode="after")
     def _secure_defaults(self) -> Settings:

@@ -16,7 +16,16 @@ const STATUS: Record<AgentAction["status"], { label: string; cls: string }> = {
   superseded: { label: "Replaced by a newer proposal", cls: "border-line bg-paper-2 text-muted" },
 };
 
-export function ApprovalCard({ action, conversationId }: { action: AgentAction; conversationId?: string }) {
+export function ApprovalCard({
+  action,
+  conversationId,
+  onDecided,
+}: {
+  action: AgentAction;
+  conversationId?: string;
+  /** Called after an approve or reject attempt, so the owner (e.g. a task card) can refresh. */
+  onDecided?: () => void;
+}) {
   const qc = useQueryClient();
   const toast = useToast();
   const [current, setCurrent] = useState(action);
@@ -25,6 +34,7 @@ export function ApprovalCard({ action, conversationId }: { action: AgentAction; 
 
   const refresh = () => {
     if (conversationId) qc.invalidateQueries({ queryKey: qk.conversation(conversationId) });
+    onDecided?.();
   };
 
   const approve = useMutation({

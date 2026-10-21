@@ -5,6 +5,7 @@ import { Link } from "react-router";
 import { Container } from "../components/Layout";
 import { EmptyState, ErrorState, PageHeader, Spinner } from "../components/ui";
 import { useToast } from "../components/toastContext";
+import { ApprovalCard } from "../features/chat/ApprovalCard";
 import { api } from "../lib/api";
 import { formatDate, formatINR } from "../lib/format";
 import { errorMessage, qk, useCategories } from "../lib/queries";
@@ -261,6 +262,13 @@ function TaskCard({ task, onChange, onCreated }: { task: AgentTask; onChange: ()
         </p>
       )}
       {task.kind === "product_research" && task.result && <ResearchSummary task={task} />}
+      {task.proposals && task.proposals.length > 0 && (
+        <div className="mt-4 space-y-3" data-testid="task-proposals">
+          {task.proposals.map((a) => (
+            <ApprovalCard key={a.id} action={a} onDecided={onChange} />
+          ))}
+        </div>
+      )}
 
       <div className="mt-4 flex flex-wrap gap-2">
         <button type="button" className="btn btn-sm" onClick={() => setOpen((v) => !v)} aria-expanded={open}>

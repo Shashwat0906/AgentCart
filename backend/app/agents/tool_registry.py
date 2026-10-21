@@ -1,13 +1,14 @@
-"""Typed tool registry for the shopping agent (Phase 1: read-only tools).
+"""Typed tool registry for the shopping agent: read-only tools and approval-gated "propose" tools.
 
 Every tool has a strict Pydantic input schema, an output schema (the same response models the HTTP
 API uses), a permission level, and an authorization rule. `ToolRegistry.execute` is the only entry
 point: it validates input, checks permission and identity, runs the handler, refuses any database
 write, validates the output, maps errors to stable codes, and records an audit entry.
 
-Phase 1 registers read-only tools only, and nothing in the agent graph or the API uses this module
-yet, so production behaviour is unchanged. Later phases add "propose" tools (pending, approval-gated
-actions). There is deliberately no "execute" permission: state changes stay behind user approval.
+Read tools may not change anything. A "propose" tool (Phase 3 S4) may only create *pending* agent actions,
+which change nothing until their owner approves them through the approval API (which re-checks price and
+stock). Any other write is rolled back. There is deliberately no "execute" permission and no checkout tool:
+state changes stay behind user approval.
 """
 
 from __future__ import annotations
@@ -16,12 +17,14 @@ import logging
 import math
 import re
 import time
+import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
@@ -29,18 +32,18 @@ from app.agents.intent import Constraint, ShoppingIntent
 from app.agents.planner import ConstraintReport
 from app.core.config import Settings
 from app.core.errors import AppError, NotFoundError, ValidationFailed
-from app.models import Cart
+from app.models import AgentAction, Cart
 from app.schemas import CartOut, ComparisonOut, ProductDetailOut, ProductPage
 from app.services import cart as cart_service
 from app.services import catalog
 from app.services.catalog import SortKey
 from app.services.ranking import evaluate, violation_message
-from app.services.specs import CATEGORY_LABELS
+from app.services.specs import CATEGORY_LABELS, format_inr
 
 logger = logging.getLogger("agentcart.tools")
 
-Permission = Literal["read"]
-REGISTRABLE_PERMISSIONS: frozenset[str] = frozenset({"read"})
+Permission = Literal["read", "propose"]
+REGISTRABLE_PERMISSIONS: frozenset[str] = frozenset({"read", "propose"})
 ErrorCode = Literal[
     "unknown_tool",
     "forbidden",
@@ -139,6 +142,26 @@ class EvaluateConstraintsInput(ToolInput):
         return v
 
 
+class ProposeAddToCartInput(ToolInput):
+    """What to propose. The price, the eligibility check and the owner come from the server, never from here."""
+
+    product_id: int = Field(ge=1)
+    quantity: int = Field(default=1, ge=1, le=100)
+
+
+class ProposalOut(BaseModel):
+    action_id: str
+    status: str
+    product_id: int
+    product_name: str
+    quantity: int
+    unit_price_inr: int
+    total_inr: int
+    summary: str
+    expires_at: datetime
+    reused: bool  # True when a resumed step returned the proposal it had already made
+
+
 # ------------------------------------------------------------------ execution types
 @dataclass(frozen=True)
 class TaskConstraints:
@@ -147,10 +170,19 @@ class TaskConstraints:
 
     category: str | None
     hard: tuple[Constraint, ...]
+    # The budget on its own as well (it is also among `hard`), so a proposal can record it and approval can
+    # re-check a changed price against it.
+    budget_max: int | None = None
+    budget_min: int | None = None
 
     @classmethod
     def from_intent(cls, intent: ShoppingIntent) -> TaskConstraints:
-        return cls(category=intent.category, hard=tuple(intent.hard_constraints()))
+        return cls(
+            category=intent.category,
+            hard=tuple(intent.hard_constraints()),
+            budget_max=intent.budget_max,
+            budget_min=intent.budget_min,
+        )
 
     def labels(self) -> list[str]:
         out = [f"Category: {CATEGORY_LABELS[self.category]}"] if self.category else []
@@ -165,6 +197,8 @@ class ToolContext:
     user_id: int | None = None  # the authenticated caller; never taken from tool arguments
     allowed_permissions: frozenset[str] = frozenset({"read"})
     constraints: TaskConstraints | None = None  # the task's requirements, for evaluate_constraints
+    task_id: str | None = None  # the task and step being executed, for propose tools (never from arguments)
+    task_step_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -299,10 +333,15 @@ class ToolRegistry:
         if spec.permission == "read" and _rollback_if_dirty(ctx.db):
             logger.error("read-only tool %s modified the session; changes rolled back", name)
             return _fail(name, "write_attempted", "A read-only tool attempted to change data")
+        if spec.permission == "propose" and not _only_new_pending_actions(ctx.db):
+            ctx.db.rollback()
+            logger.error("propose tool %s changed more than pending actions; changes rolled back", name)
+            return _fail(name, "write_attempted", "A propose tool may only create pending actions")
 
         try:
             data = spec.output_model.model_validate(raw).model_dump(mode="json")
         except ValidationError:
+            _rollback_if_dirty(ctx.db)  # never keep a proposal whose result can't be reported
             logger.exception("tool %s returned output that does not match its schema", name)
             return _fail(name, "invalid_output", "The tool returned malformed data")
         return ToolResult(tool=name, ok=True, data=data)
@@ -310,6 +349,13 @@ class ToolRegistry:
 
 def _fail(name: str, code: ErrorCode, message: str, details: dict[str, Any] | None = None) -> ToolResult:
     return ToolResult(tool=name, ok=False, error=ToolError(code=code, message=message, details=details or {}))
+
+
+def _only_new_pending_actions(db: Session) -> bool:
+    """A propose tool's only allowed effect: new, pending agent actions. Nothing modified, nothing deleted."""
+    if db.dirty or db.deleted:
+        return False
+    return all(isinstance(o, AgentAction) and o.status == "pending" for o in db.new)
 
 
 def _rollback_if_dirty(db: Session) -> bool:
@@ -385,17 +431,94 @@ def _evaluate_constraints(ctx: ToolContext, inp: EvaluateConstraintsInput) -> di
         raise NotFoundError("One or more products do not exist")
     results = []
     for pid in inp.product_ids:  # requested order
-        p = products[pid]
-        violations: list[str] = []
-        if req.category is not None and p.category != req.category:
-            violations.append(
-                f"Category: {CATEGORY_LABELS.get(p.category, p.category)} (you asked for {CATEGORY_LABELS[req.category]})"
-            )
-        violations += [violation_message(c, p) for c in req.hard if evaluate(c, p) is not True]
-        if p.stock <= 0:
-            violations.append("Out of stock")
+        violations = _violations(req, products[pid])
         results.append({"product_id": pid, "passes": not violations, "violations": violations})
     return {"results": results, "constraints": req.labels()}
+
+
+def _violations(req: TaskConstraints, p: Any) -> list[str]:
+    """Every requirement of the task that product `p` breaks (an unknown attribute counts as broken)."""
+    out: list[str] = []
+    if req.category is not None and p.category != req.category:
+        out.append(
+            f"Category: {CATEGORY_LABELS.get(p.category, p.category)} (you asked for {CATEGORY_LABELS[req.category]})"
+        )
+    out += [violation_message(c, p) for c in req.hard if evaluate(c, p) is not True]
+    if p.stock <= 0:
+        out.append("Out of stock")
+    return out
+
+
+# ------------------------------------------------------------------ propose tools (approval-gated)
+def _proposal_out(a: AgentAction, *, reused: bool) -> dict[str, Any]:
+    p = a.payload
+    unit, qty = int(p["expected_price_inr"]), int(p["quantity"])
+    return {
+        "action_id": a.id,
+        "status": a.status,
+        "product_id": int(p["product_id"]),
+        "product_name": str(p.get("product_name", "")),
+        "quantity": qty,
+        "unit_price_inr": unit,
+        "total_inr": unit * qty,
+        "summary": a.summary,
+        "expires_at": a.expires_at,
+        "reused": reused,
+    }
+
+
+def _propose_add_to_cart(ctx: ToolContext, inp: ProposeAddToCartInput) -> dict[str, Any]:
+    """Create a *pending* add-to-cart action for the task's owner. The cart is not touched: the owner
+    approves or rejects it through the approval API, which re-checks price and stock at that moment."""
+    if ctx.user_id is None or ctx.task_id is None or ctx.task_step_id is None:
+        raise ValidationFailed("Proposals can only be made by a task step")
+    existing = ctx.db.scalar(select(AgentAction).where(AgentAction.task_step_id == ctx.task_step_id))
+    if existing is not None:  # this step already proposed (it is being resumed or retried): never twice
+        return _proposal_out(existing, reused=True)
+    made = ctx.db.scalar(
+        select(func.count())
+        .select_from(AgentAction)
+        .where(AgentAction.task_id == ctx.task_id, AgentAction.task_step_id.is_not(None))
+    )
+    if (made or 0) >= ctx.settings.task_max_proposals:
+        raise ValidationFailed(f"A task can make at most {ctx.settings.task_max_proposals} cart proposal(s)")
+    if inp.quantity > ctx.settings.max_item_quantity:
+        raise ValidationFailed(f"You can buy at most {ctx.settings.max_item_quantity} units of one product")
+    req = ctx.constraints
+    if req is None:
+        raise ValidationFailed("A proposal must be checked against the task's requirements, and none were provided")
+    found = catalog.products_by_ids(ctx.db, [inp.product_id])
+    if not found:
+        raise NotFoundError("Product not found")
+    product = found[0]
+    problems = _violations(req, product)  # re-checked here: never trust the planner's view of eligibility
+    if problems:
+        raise ValidationFailed(f"{product.name} doesn't meet the task's requirements: " + "; ".join(problems))
+    if product.stock < inp.quantity:
+        raise ValidationFailed(f"Only {product.stock} unit(s) of {product.name} available")
+    action = AgentAction(
+        id=str(uuid.uuid4()),
+        user_id=ctx.user_id,
+        conversation_id=None,
+        task_id=ctx.task_id,
+        task_step_id=ctx.task_step_id,
+        kind="add_to_cart",
+        payload={
+            "product_id": product.id,
+            "quantity": inp.quantity,
+            "expected_price_inr": product.price_inr,
+            "product_name": product.name,
+            # the task's budget, re-checked at approval if the price changes (never re-proposed outside it)
+            **({"budget_max_inr": req.budget_max} if req.budget_max is not None else {}),
+            **({"budget_min_inr": req.budget_min} if req.budget_min is not None else {}),
+        },
+        summary=f"Add {inp.quantity} × {product.name} ({format_inr(product.price_inr)} each) to your cart"[:300],
+        status="pending",
+        result={},
+        expires_at=datetime.now(UTC) + timedelta(minutes=ctx.settings.agent_action_ttl_minutes),
+    )
+    ctx.db.add(action)  # committed by the task runner together with the step's success, atomically
+    return _proposal_out(action, reused=False)
 
 
 READ_ONLY_TOOLS: tuple[ToolSpec, ...] = (
@@ -441,8 +564,33 @@ READ_ONLY_TOOLS: tuple[ToolSpec, ...] = (
 )
 
 
+PROPOSE_TOOLS: tuple[ToolSpec, ...] = (
+    ToolSpec(
+        name="propose_add_to_cart",
+        description=(
+            "Propose adding a product that met every requirement to the user's cart. Creates a pending action "
+            "only: nothing is added until the user approves it, and price and stock are re-checked then."
+        ),
+        input_model=ProposeAddToCartInput,
+        output_model=ProposalOut,
+        handler=_propose_add_to_cart,
+        permission="propose",
+        requires_user=True,
+    ),
+)
+
+
 def build_read_only_registry() -> ToolRegistry:
     registry = ToolRegistry()
     for spec in READ_ONLY_TOOLS:
+        registry.register(spec)
+    return registry
+
+
+def build_task_registry() -> ToolRegistry:
+    """Read tools plus approval-gated propose tools. Which ones a task may use is decided per task through
+    `ToolContext.allowed_permissions` (propose only when the user opted in)."""
+    registry = build_read_only_registry()
+    for spec in PROPOSE_TOOLS:
         registry.register(spec)
     return registry

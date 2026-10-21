@@ -52,6 +52,15 @@ class AgentAction(Base):
     conversation_id: Mapped[str | None] = mapped_column(
         ForeignKey("conversations.id", ondelete="CASCADE"), nullable=True, index=True
     )
+    # Set for proposals made by an agent task (S4). The step link is unique: one step can create at most one
+    # action, so a resumed or retried step can never propose twice. SET NULL keeps the user's action history
+    # if a task is deleted. NULL for chat proposals.
+    task_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agent_tasks.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    task_step_id: Mapped[int | None] = mapped_column(
+        ForeignKey("agent_task_steps.id", ondelete="SET NULL"), nullable=True, unique=True
+    )
     kind: Mapped[str] = mapped_column(String(32))  # add_to_cart | save_preference
     payload: Mapped[dict[str, Any]] = mapped_column(JSONType)
     summary: Mapped[str] = mapped_column(String(300))

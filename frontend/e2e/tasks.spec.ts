@@ -96,6 +96,35 @@ test("a sentence with a typed budget ('I need a laptop under ₹60,000') finds l
   for (const p of prices) expect(Number(p.split("·")[0].replace(/[^\d]/g, ""))).toBeLessThanOrEqual(60_000);
 });
 
+test("an agent task's cart proposal changes nothing until it is approved on the Tasks page", async ({ page }) => {
+  await registerViaUI(page);
+  // Agent tasks get their own form in S6; until then, start one through the API with the signed-in session.
+  const token = await page.evaluate(() => JSON.parse(localStorage.getItem("agentcart.session") ?? "{}").token as string);
+  const created = await page.request.post("/api/tasks", {
+    headers: { Authorization: `Bearer ${token}` },
+    data: { kind: "shopping_agent", input: { goal: "add a wireless mouse under ₹3,000 to my cart", allow_proposals: true } },
+  });
+  expect(created.status()).toBe(201);
+
+  await page.goto("/tasks");
+  const card = page.getByTestId("task-card").first();
+  await expect(card).toContainText("Agent: add a wireless mouse under ₹3,000 to my cart");
+  await expect(card.getByTestId("task-status")).toHaveText("Done", { timeout: 20_000 });
+  const proposal = card.getByTestId("task-proposals");
+  await expect(proposal.getByTestId("action-status")).toHaveText("Waiting for your approval");
+  const summary = (await proposal.locator("p.font-medium").innerText()).trim(); // "Add 1 × <name> (₹… each) to your cart"
+  const price = Number(summary.match(/₹([\d,]+) each/)?.[1].replace(/,/g, ""));
+  expect(price).toBeGreaterThan(0);
+  expect(price).toBeLessThanOrEqual(3_000);
+  await expect(page.getByTestId("cart-count")).toHaveCount(0); // proposed, not added
+
+  await proposal.getByRole("button", { name: "Approve" }).click();
+  await expect(proposal.getByTestId("action-status")).toHaveText("Approved & done");
+  await expect(page.getByTestId("cart-count")).toHaveText("1");
+  await page.reload(); // the decision is persisted server-side
+  await expect(page.getByTestId("task-card").first().getByTestId("action-status")).toHaveText("Approved & done");
+});
+
 test("tasks page requires sign in", async ({ page }) => {
   await page.goto("/tasks");
   await expect(page).toHaveURL(/\/login\?next=%2Ftasks/);
