@@ -67,6 +67,13 @@ test("laptop research under ₹60,000 finds the catalogue's laptops even with th
   const prices = await result.locator("li .tabular-nums").allTextContents();
   expect(prices.length).toBeGreaterThan(0);
   for (const p of prices) expect(Number(p.split("·")[0].replace(/[^\d]/g, ""))).toBeLessThanOrEqual(60_000);
+
+  // A typed minimum above the maximum can't be satisfied: refused, not silently dropped.
+  await form.getByLabel("Looking for").fill("laptop above ₹60,000");
+  await form.getByLabel("Maximum price (₹)").fill("50000");
+  await form.getByRole("button", { name: "Start research" }).click();
+  await expect(page.getByText("The price in “Looking for” conflicts with the maximum price")).toBeVisible();
+  await expect(page.getByTestId("task-card")).toHaveCount(1); // no task was created
 });
 
 test("tasks page requires sign in", async ({ page }) => {

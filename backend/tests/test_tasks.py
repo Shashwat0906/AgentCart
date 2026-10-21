@@ -232,6 +232,52 @@ def test_a_typed_budget_only_narrows_the_explicit_maximum(client: TestClient) ->
     assert higher["result"]["matches"] == 7
 
 
+def test_a_typed_minimum_price_is_enforced(client: TestClient) -> None:
+    h = register(client)
+    t = fetch(client, h, start(client, h, {"query": "laptop above 60000"}).json()["id"])
+    args = t["steps"][0]["args"]
+    assert args["query"] == "laptop" and args["min_price_inr"] == 60_000 and "max_price_inr" not in args
+    truth = client.get("/api/products", params={"category": "laptops", "min_price": 60_000, "in_stock": "true"}).json()
+    assert t["result"]["matches"] == truth["total"] > 0
+    assert all(p["price_inr"] >= 60_000 for p in t["result"]["top"]) and t["result"]["all_within_budget"] is True
+
+
+def test_a_typed_budget_that_conflicts_with_the_maximum_price_is_rejected(
+    client: TestClient, SessionLocal: sessionmaker[Session]
+) -> None:
+    """ "above ₹60,000" with a ₹50,000 maximum can't both hold: reject it instead of dropping a limit
+    and listing laptops the user excluded."""
+    h = register(client)
+    r = start(client, h, {"query": "laptop above 60000", "max_price_inr": 50_000})
+    assert r.status_code == 422 and "conflicts with the maximum price" in r.json()["error"]["message"]
+    with SessionLocal() as s:
+        assert counts(s, AgentTask)["agent_tasks"] == 0
+    # a range inside the maximum is fine and both ends are enforced
+    t = fetch(
+        client, h, start(client, h, {"query": "laptop between 40000 and 60000", "max_price_inr": 50_000}).json()["id"]
+    )
+    args = t["steps"][0]["args"]
+    assert (args["min_price_inr"], args["max_price_inr"]) == (40_000, 50_000)
+    assert all(40_000 <= p["price_inr"] <= 50_000 for p in t["result"]["top"])
+
+
+def test_summary_budget_check_includes_a_typed_minimum() -> None:
+    top = [
+        {
+            "id": 1,
+            "name": "a",
+            "brand": "b",
+            "category": "laptops",
+            "price_inr": 45_000,
+            "rating": 4.0,
+            "in_stock": True,
+        }
+    ]
+    inp = {"query": "laptop above 60000", "compare_top": 3}
+    summary = task_service._summarize(inp, {"search": {"items": top, "total": 1}})
+    assert summary["all_within_budget"] is False
+
+
 def test_queries_without_a_budget_are_searched_unchanged(client: TestClient) -> None:
     h = register(client)
     for inp in (
