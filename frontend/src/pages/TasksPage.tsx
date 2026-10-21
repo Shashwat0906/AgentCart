@@ -334,6 +334,9 @@ function ResearchSummary({ task }: { task: ProductResearchTask }) {
           ))}
         </ul>
       )}
+      {r.ranked_for?.length ? (
+        <p className="mt-2 text-muted" data-testid="task-ranked-for">Sorted by suitability for {r.ranked_for.join(", ")}.</p>
+      ) : null}
       {r.best.price_inr?.length ? <p className="mt-2 text-muted">Lowest price: {r.best.price_inr.join(", ")}</p> : null}
       {r.best.rating?.length ? <p className="text-muted">Best rated: {r.best.rating.join(", ")}</p> : null}
     </div>

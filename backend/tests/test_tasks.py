@@ -308,18 +308,25 @@ def test_a_sentence_with_a_typed_budget_finds_the_laptops_within_it(client: Test
 
 def test_request_words_are_dropped_but_product_words_still_filter(client: TestClient) -> None:
     h = register(client)
-    gaming = fetch(
+    # "noise cancelling" is a product feature (every keyword must match); use cases such as "gaming" or "coding"
+    # rank instead of filtering (test_research_use_cases.py)
+    anc = fetch(
         client,
         h,
-        start(client, h, {"category": "laptops", "query": "I need a gaming laptop under ₹60,000"}).json()["id"],
+        start(
+            client, h, {"category": "headphones", "query": "I need noise cancelling headphones under ₹10,000"}
+        ).json()["id"],
     )
-    assert gaming["steps"][0]["args"]["query"] == "gaming laptop"
-    plain_gaming = fetch(
+    assert anc["steps"][0]["args"]["query"] == "noise cancelling headphones"
+    plain_anc = fetch(
         client,
         h,
-        start(client, h, {"category": "laptops", "query": "gaming laptop", "max_price_inr": 60_000}).json()["id"],
+        start(
+            client, h, {"category": "headphones", "query": "noise cancelling headphones", "max_price_inr": 10_000}
+        ).json()["id"],
     )
-    assert gaming["result"]["matches"] == plain_gaming["result"]["matches"] < 7  # "gaming" still narrows
+    all_under = fetch(client, h, start(client, h, {"category": "headphones", "max_price_inr": 10_000}).json()["id"])
+    assert anc["result"]["matches"] == plain_anc["result"]["matches"] < all_under["result"]["matches"]  # still narrows
     only_words = fetch(
         client, h, start(client, h, {"category": "laptops", "query": "I need something good"}).json()["id"]
     )
@@ -332,7 +339,7 @@ def test_request_words_are_dropped_but_product_words_still_filter(client: TestCl
 def test_queries_without_a_budget_are_searched_unchanged(client: TestClient) -> None:
     h = register(client)
     for inp in (
-        {"query": "gaming laptop", "category": "laptops"},
+        {"query": "wireless mouse", "category": "mice"},
         {"query": "noise cancelling"},
         {"query": "4k monitor"},
     ):

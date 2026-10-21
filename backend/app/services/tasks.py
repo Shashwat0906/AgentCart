@@ -33,7 +33,8 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 from app.agents.guardrails import sanitize_user_text
-from app.agents.parser import RequestParser, strip_budget_phrases
+from app.agents.intent import ShoppingIntent
+from app.agents.parser import RequestParser, strip_budget_phrases, strip_use_case_phrases
 from app.agents.planner import (
     AgentGoal,
     Clarify,
@@ -58,6 +59,8 @@ from app.core.config import Settings
 from app.core.errors import ConflictError, NotFoundError, RateLimited, ValidationFailed
 from app.models import AgentTask, AgentTaskStep
 from app.models.task import FINISHED_STEP_STATUSES, TERMINAL_TASK_STATUSES
+from app.services import catalog
+from app.services.ranking import rank_products
 from app.services.specs import CATEGORY_LABELS, format_inr
 
 logger = logging.getLogger("agentcart.tasks")
@@ -417,7 +420,7 @@ class TaskRunner:
             if step.status in FINISHED_STEP_STATUSES:
                 continue  # done in an earlier run: never repeated
             if step.args is None:
-                resolved = _resolve_args(step, task.input, outputs)
+                resolved = _resolve_args(step, task.input, outputs, db)
                 if resolved is None:
                     step.status, step.output = "skipped", {"reason": _skip_reason(step, task.input, outputs)}
                     step.finished_at = _now()
@@ -484,7 +487,7 @@ class TaskRunner:
         permissions: frozenset[str] = READ_ONLY,
     ) -> StepOutcome:
         if step.tool == SUMMARIZE:
-            return True, _summarize(task.input, outputs), None
+            return True, _summarize(task.input, outputs, db), None
         ctx = ToolContext(
             db=db,
             settings=self.settings,
@@ -754,7 +757,7 @@ class TaskRunner:
 
 # ------------------------------------------------------------------ product_research step logic
 def _resolve_args(
-    step: AgentTaskStep, inp: dict[str, Any], outputs: dict[str, dict[str, Any] | None]
+    step: AgentTaskStep, inp: dict[str, Any], outputs: dict[str, dict[str, Any] | None], db: Session | None = None
 ) -> dict[str, Any] | None:
     """Arguments for a step, or None when the step should be skipped."""
     if step.name == "search":
@@ -762,7 +765,8 @@ def _resolve_args(
         args: dict[str, Any] = {
             "in_stock": inp.get("in_stock", True),
             "sort": "relevance" if terms["query"] else "rating",
-            "page_size": 12,
+            # ranking by use case looks at the whole shortlist (a category holds at most 25 products)
+            "page_size": 48 if terms["use_cases"] else 12,
         }
         for key in ("query", "min_price_inr", "max_price_inr"):
             if terms[key] is not None:
@@ -772,7 +776,7 @@ def _resolve_args(
                 args[key] = inp[key]
         return args
     if step.name == "compare":
-        items = (outputs.get("search") or {}).get("items") or []
+        items = _ranked_items(inp, outputs, db)
         ids = [p["id"] for p in items[: int(inp.get("compare_top", 3))]]
         return {"product_ids": ids} if len(ids) >= 2 else None
     if step.name in ("cart", "summarize"):
@@ -790,13 +794,46 @@ def _research_terms(inp: dict[str, Any]) -> dict[str, Any]:
     """
     query, cap = inp.get("query"), inp.get("max_price_inr")
     floor: int | None = None
+    use_cases: list[str] = []
+    intent: ShoppingIntent | None = None
     if query:
         intent = RequestParser().parse(sanitize_user_text(query))
         if intent.budget_max is not None:
             cap = intent.budget_max if cap is None else min(cap, intent.budget_max)
         floor = intent.budget_min
-        query = _product_words(strip_budget_phrases(query)) or None
-    return {"query": query, "min_price_inr": floor, "max_price_inr": cap}
+        use_cases = list(intent.use_cases)
+        # What the product is for ("for coding", "college") ranks the results; it isn't a required keyword.
+        query = _product_words(strip_use_case_phrases(strip_budget_phrases(query), use_cases)) or None
+    return {"query": query, "min_price_inr": floor, "max_price_inr": cap, "use_cases": use_cases, "intent": intent}
+
+
+def _ranking_intent(inp: dict[str, Any], terms: dict[str, Any]) -> ShoppingIntent | None:
+    """The parsed intent to rank a research task's results by, when its query names a use case."""
+    intent = terms.get("intent")
+    if intent is None or not terms.get("use_cases"):
+        return None
+    update: dict[str, Any] = {"budget_max": terms["max_price_inr"], "budget_min": terms["min_price_inr"]}
+    if inp.get("category"):
+        update["category"] = inp["category"]
+    ranked: ShoppingIntent = intent.model_copy(update=update)
+    return ranked
+
+
+def _ranked_items(
+    inp: dict[str, Any], outputs: dict[str, dict[str, Any] | None], db: Session | None
+) -> list[dict[str, Any]]:
+    """The search results in the order a research task presents them: by suitability for the query's use case
+    (coding, college, gaming …) when it names one, otherwise as searched. Only reorders what the search
+    returned: category, price and stock were already enforced by the search, and nothing is added."""
+    items = list((outputs.get("search") or {}).get("items") or [])
+    intent = _ranking_intent(inp, _research_terms(inp))
+    if intent is None or db is None or len(items) < 2:
+        return items
+    by_id = {p.id: p for p in catalog.products_by_ids(db, [int(i["id"]) for i in items])}
+    products = [by_id[int(i["id"])] for i in items if int(i["id"]) in by_id]
+    order = [r.product.id for r in rank_products(products, intent)]
+    position = {pid: n for n, pid in enumerate(order)}
+    return sorted(items, key=lambda i: position.get(int(i["id"]), len(order)))
 
 
 # How people phrase a request ("I need a …", "show me a good …"), not properties of a product. Every search
@@ -861,15 +898,21 @@ def _skip_reason(step: AgentTaskStep, inp: dict[str, Any], outputs: dict[str, di
     return "Not needed"
 
 
-def _summarize(inp: dict[str, Any], outputs: dict[str, dict[str, Any] | None]) -> dict[str, Any]:
-    """Deterministic summary built only from stored step outputs (no LLM, no new data)."""
+def _summarize(
+    inp: dict[str, Any], outputs: dict[str, dict[str, Any] | None], db: Session | None = None
+) -> dict[str, Any]:
+    """Deterministic summary built only from stored step outputs (no LLM, no new data). When the query names a
+    use case, the products are listed in order of suitability for it (`ranked_for`)."""
     search = outputs.get("search") or {}
-    items = search.get("items") or []
+    items = _ranked_items(inp, outputs, db)
     top = [
         {k: p[k] for k in ("id", "name", "brand", "category", "price_inr", "rating", "in_stock")}
         for p in items[: int(inp.get("compare_top", 3))]
     ]
     summary: dict[str, Any] = {"matches": int(search.get("total") or 0), "top": top, "best": {}}
+    use_cases = _research_terms(inp)["use_cases"]
+    if use_cases and db is not None:
+        summary["ranked_for"] = use_cases
     comparison = outputs.get("compare")
     if comparison:
         names = [c["name"] for c in comparison.get("columns", [])]

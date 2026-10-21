@@ -235,6 +235,53 @@ def _parse_money_token(token: str) -> int | None:
     return _amount(m.group(1), m.group(2)) if m else None
 
 
+# Use cases the parser recognises (shared by `_use_cases` and `strip_use_case_phrases`).
+_UC_ML = re.compile(
+    r"machine learning|deep learning|\bml\b|\bai\b|data science|neural net\w*|training models?|pytorch|tensorflow|\bllms?\b|\bcuda\b"
+)
+_UC_GAMING = re.compile(r"\bgam(e|es|ing|er)\b|esports|\bfps\b")
+_UC_STUDY = re.compile(r"college|student|school|studies|studying|university|campus|class(es)?\b|assignments?")
+_UC_WORK = re.compile(r"office|work\b|productivity|coding|programming|developer|software dev\w*|spreadsheets?")
+_UC_CREATIVE = re.compile(
+    r"video editing|photo editing|content creat\w*|creator|graphic design|3d|rendering|premiere|davinci"
+)
+_UC_TRAVEL = re.compile(r"travel\w*|commut\w*|flights?|metro|train journeys?")
+_UC_FITNESS = re.compile(r"running|\brun\b|fitness|workout|gym|cycling|marathon|hiking|trek\w*")
+_UC_NOTES = re.compile(r"note[- ]?taking|notes|drawing|sketch\w*|illustrat\w*")
+_UC_MEDIA = re.compile(r"movies|netflix|streaming|binge|media consumption|youtube")
+_UC_OUTDOOR = re.compile(r"party|outdoor|beach|pool|camping")
+USE_CASE_PATTERNS: dict[str, re.Pattern[str]] = {
+    "machine learning": _UC_ML,
+    "gaming": _UC_GAMING,
+    "study": _UC_STUDY,
+    "work": _UC_WORK,
+    "creative work": _UC_CREATIVE,
+    "travel": _UC_TRAVEL,
+    "fitness": _UC_FITNESS,
+    "notes & drawing": _UC_NOTES,
+    "media": _UC_MEDIA,
+    "outdoor": _UC_OUTDOOR,
+}
+
+
+def strip_use_case_phrases(text: str, use_cases: list[str]) -> str:
+    """`text` without the words that only say what the product is for ("for coding", "college"), for the
+    use cases the parser recognised. They are used for ranking, not as required search keywords: no product's
+    text says "coding". Whole words only ("network" keeps its "work")."""
+    low, out = text.lower(), text
+    spans: list[tuple[int, int]] = []
+    for uc in use_cases:
+        rx = USE_CASE_PATTERNS.get(uc)
+        for m in rx.finditer(low) if rx else ():
+            s, e = m.span()
+            if (s and low[s - 1].isalnum()) or (e < len(low) and low[e].isalnum()):
+                continue
+            spans.append((s, e))
+    for s, e in sorted(spans, reverse=True):
+        out = f"{out[:s]} {out[e:]}"
+    return " ".join(out.split())
+
+
 _QTY_WORDS = {
     "a couple of": 2,
     "a pair of": 2,
@@ -759,15 +806,12 @@ class RequestParser:
     def _use_cases(self, low: str, intent: ShoppingIntent) -> None:
         cat = intent.category or ""
         uc: list[str] = []
-        if re.search(
-            r"machine learning|deep learning|\bml\b|\bai\b|data science|neural net\w*|training models?|pytorch|tensorflow|\bllms?\b|\bcuda\b",
-            low,
-        ):
+        if _UC_ML.search(low):
             uc.append("machine learning")
             if cat == "laptops":
                 self._soft_flag(intent, "dedicated_gpu", "Dedicated GPU (helps with machine learning)")
                 self._pref(intent, "ram_gb", "max", "More RAM for ML workloads")
-        if re.search(r"\bgam(e|es|ing|er)\b|esports|\bfps\b", low):
+        if _UC_GAMING.search(low):
             uc.append("gaming")
             if cat == "laptops":
                 self._soft_flag(intent, "dedicated_gpu", "Dedicated GPU (for gaming)")
@@ -783,46 +827,44 @@ class RequestParser:
                 self._pref(intent, "weight_g", "min", "Lightweight")
             elif cat == "keyboards":
                 self._soft_flag(intent, "mechanical", "Mechanical switches (for gaming)")
-        if re.search(r"college|student|school|studies|studying|university|campus|class(es)?\b|assignments?", low):
+        if _UC_STUDY.search(low):
             uc.append("study")
             if cat == "laptops":
                 self._pref(intent, "battery_hours", "max", "Long battery life", 1.0)
                 self._pref(intent, "weight_kg", "min", "Easy to carry", 0.7)
             elif cat == "tablets":
                 self._soft_flag(intent, "stylus_support", "Stylus support (for notes)")
-        if re.search(r"office|work\b|productivity|coding|programming|developer|software dev\w*|spreadsheets?", low):
+        if _UC_WORK.search(low):
             uc.append("work")
             if cat == "laptops":
                 self._pref(intent, "ram_gb", "max", "More RAM for multitasking", 0.8)
             elif cat == "monitors":
                 self._soft_flag(intent, "usb_c", "USB-C (single-cable laptop setup)")
-        if re.search(
-            r"video editing|photo editing|content creat\w*|creator|graphic design|3d|rendering|premiere|davinci", low
-        ):
+        if _UC_CREATIVE.search(low):
             uc.append("creative work")
             if cat == "laptops":
                 self._soft_flag(intent, "dedicated_gpu", "Dedicated GPU (faster rendering)")
                 self._pref(intent, "ram_gb", "max", "More RAM for editing")
-        if re.search(r"travel\w*|commut\w*|flights?|metro|train journeys?", low):
+        if _UC_TRAVEL.search(low):
             uc.append("travel")
             if cat == "headphones":
                 self._soft_flag(intent, "anc", "Noise cancelling (for travel)")
                 self._pref(intent, "battery_hours", "max", "Long battery life")
             elif cat == "laptops":
                 self._pref(intent, "weight_kg", "min", "Lightweight for travel")
-        if re.search(r"running|\brun\b|fitness|workout|gym|cycling|marathon|hiking|trek\w*", low):
+        if _UC_FITNESS.search(low):
             uc.append("fitness")
             if cat == "smartwatches":
                 self._soft_flag(intent, "gps", "Built-in GPS (for outdoor workouts)")
                 self._pref(intent, "battery_days", "max", "Long battery life")
-        if re.search(r"note[- ]?taking|notes|drawing|sketch\w*|illustrat\w*", low):
+        if _UC_NOTES.search(low):
             uc.append("notes & drawing")
             if cat == "tablets":
                 self._soft_flag(intent, "stylus_support", "Stylus support")
-        if re.search(r"movies|netflix|streaming|binge|media consumption|youtube", low) and cat == "tablets":
+        if _UC_MEDIA.search(low) and cat == "tablets":
             uc.append("media")
             self._pref(intent, "display_inches", "max", "Large screen for media")
-        if re.search(r"party|outdoor|beach|pool|camping", low) and cat == "speakers":
+        if _UC_OUTDOOR.search(low) and cat == "speakers":
             uc.append("outdoor")
             self._soft_flag(intent, "waterproof", "Waterproof (for outdoors)")
             self._pref(intent, "output_w", "max", "Loud output")

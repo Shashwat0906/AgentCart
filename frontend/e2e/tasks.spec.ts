@@ -125,6 +125,27 @@ test("an agent task's cart proposal changes nothing until it is approved on the 
   await expect(page.getByTestId("task-card").first().getByTestId("action-status")).toHaveText("Approved & done");
 });
 
+test("'need a laptop for coding' under ₹50,000 finds the catalogue's laptops, ranked for the use case", async ({ page }) => {
+  // Production report: this exact research task returned "0 matching products" ("coding" was a required keyword).
+  await registerViaUI(page);
+  await page.goto("/tasks");
+  const form = page.getByRole("form", { name: "New research task" });
+  await expect(form.getByRole("option", { name: "Laptops" })).toBeAttached();
+  await form.getByLabel("Category").selectOption("laptops");
+  await form.getByLabel("Looking for").fill("need a laptop for coding");
+  await form.getByLabel("Maximum price (₹)").fill("50000");
+  await form.getByRole("button", { name: "Start research" }).click();
+
+  const card = page.getByTestId("task-card").first();
+  await expect(card.getByTestId("task-status")).toHaveText("Done", { timeout: 20_000 });
+  const result = card.getByTestId("task-result");
+  await expect(result).toContainText("4 matching products under ₹50,000");
+  await expect(result.getByTestId("task-ranked-for")).toHaveText("Sorted by suitability for work.");
+  const prices = await result.locator("li .tabular-nums").allTextContents();
+  expect(prices.length).toBeGreaterThan(0);
+  for (const p of prices) expect(Number(p.split("·")[0].replace(/[^\d]/g, ""))).toBeLessThanOrEqual(50_000);
+});
+
 test("tasks page requires sign in", async ({ page }) => {
   await page.goto("/tasks");
   await expect(page).toHaveURL(/\/login\?next=%2Ftasks/);

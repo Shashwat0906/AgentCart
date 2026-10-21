@@ -340,6 +340,8 @@ export interface ResearchResult {
   best: { price_inr?: string[]; rating?: string[] };
   cart?: { item_count: number; total_inr: number };
   all_within_budget: boolean;
+  /** Use cases from the query ("for coding" -> work) that ordered the results; they are not search filters. */
+  ranked_for?: string[];
 }
 
 interface TaskBase {

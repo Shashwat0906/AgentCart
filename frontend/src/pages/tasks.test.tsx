@@ -377,4 +377,26 @@ describe("Task controls", () => {
     expect(card.getByText("Add 10 × Logi M185 (₹799 each, ₹7,990 total) to your cart")).toBeInTheDocument();
     expect(card.getByTestId("action-budget")).toHaveTextContent("Your budget: up to ₹3,000 per item");
   });
+
+  it("says which use case ordered a research task's results", async () => {
+    const coding = task({
+      goal: "Research laptops matching “need a laptop for coding” under ₹50,000",
+      input: { category: "laptops", query: "need a laptop for coding", max_price_inr: 50000 },
+      result: {
+        matches: 4, all_within_budget: true, ranked_for: ["work"], best: {},
+        top: [{ id: 14, name: "HP 15s (Ryzen 5 7520U)", brand: "HP", category: "laptops", price_inr: 36490, rating: 4.0, in_stock: true }],
+      },
+    });
+    mockFetch((url) => (url.endsWith("/tasks") ? { body: [coding] } : url.endsWith("/categories") ? { body: CATEGORIES } : undefined));
+    renderWithProviders(<TasksPage />);
+    const result = await screen.findByTestId("task-result");
+    expect(result).toHaveTextContent("4 matching products under ₹50,000");
+    expect(within(result).getByTestId("task-ranked-for")).toHaveTextContent("Sorted by suitability for work.");
+  });
+
+  it("shows no ranking note when the query names no use case", async () => {
+    mockFetch((url) => (url.endsWith("/tasks") ? { body: [task()] } : url.endsWith("/categories") ? { body: CATEGORIES } : undefined));
+    renderWithProviders(<TasksPage />);
+    expect(within(await screen.findByTestId("task-result")).queryByTestId("task-ranked-for")).not.toBeInTheDocument();
+  });
 });
