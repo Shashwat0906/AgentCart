@@ -26,6 +26,8 @@ def build_provider(settings: Settings) -> LLMProvider:
                 settings.hosted_llm_model,
                 timeout=timeout,
                 max_retries=retries,
+                reasoning_effort=settings.hosted_llm_reasoning_effort,
+                json_mode=settings.hosted_llm_json_mode,
             )
         if settings.llm_provider == "anthropic":
             return AnthropicProvider(
