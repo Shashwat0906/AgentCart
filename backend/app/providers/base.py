@@ -23,11 +23,13 @@ class ProviderError(RuntimeError):
 
 
 class ProviderRejected(ProviderError):
-    """The provider refused the request: invalid key (401), no access or billing required (402/403), or quota or
-    rate limit reached (429). Retrying can't help and would only spend quota, so it is raised at once."""
+    """The provider refused the request: invalid request parameters (400), invalid key (401), no access or billing
+    required (402/403), or quota or rate limit reached (429). Retrying can't help and would only spend quota, so it is
+    raised at once. Timeouts and server errors (5xx) are still retried within LLM_MAX_RETRIES."""
 
 
 _REJECTED = {
+    400: "invalid request (check the model and request parameters)",
     401: "invalid or missing API key",
     402: "payment required",
     403: "access denied",

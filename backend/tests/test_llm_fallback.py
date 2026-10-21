@@ -73,6 +73,7 @@ def timeout(request: httpx.Request) -> httpx.Response:
 @pytest.mark.parametrize(
     ("handler", "max_calls"),
     [
+        (lambda r: httpx.Response(400, json={"error": {"message": "Invalid value for reasoning_effort"}}), 2),
         (lambda r: httpx.Response(401, json={"error": {"message": "API key not valid"}}), 2),  # invalid key
         (lambda r: httpx.Response(403, json={}), 2),  # no access
         (lambda r: httpx.Response(429, json={}), 2),  # free-tier quota or rate limit reached
@@ -80,7 +81,7 @@ def timeout(request: httpx.Request) -> httpx.Response:
         (timeout, 4),  # slow provider: retried within bounds
         (lambda r: httpx.Response(200, json={"choices": [{"message": {"content": ""}}]}), 4),  # empty answer
     ],
-    ids=["invalid-key-401", "no-access-403", "quota-429", "outage-503", "timeout", "empty-answer"],
+    ids=["bad-request-400", "invalid-key-401", "no-access-403", "quota-429", "outage-503", "timeout", "empty-answer"],
 )
 def test_chat_falls_back_to_the_rules_when_the_hosted_llm_fails(
     client: TestClient, gemini: Any, handler: Callable[[httpx.Request], httpx.Response], max_calls: int

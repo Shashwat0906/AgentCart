@@ -204,6 +204,7 @@ def test_an_unknown_reasoning_effort_is_rejected() -> None:
 @pytest.mark.parametrize(
     ("status", "meaning"),
     [
+        (400, "invalid request (check the model and request parameters)"),
         (401, "invalid or missing API key"),
         (402, "payment required"),
         (403, "access denied"),
@@ -243,6 +244,16 @@ def test_server_errors_are_still_retried(fake_http: list[dict[str, Any]]) -> Non
     fake_http[0]["responses"].extend([httpx.Response(503), _ok()])
     p = OpenAICompatibleProvider(GEMINI_URL, FAKE_KEY, "m", timeout=5, max_retries=2)
     assert p.complete_json("sys", "user") == {"category": "laptops"} and len(fake_http) - 1 == 2
+
+
+@pytest.mark.parametrize("status", [500, 502, 503, 504])
+def test_every_retryable_server_error_uses_the_full_retry_budget(fake_http: list[dict[str, Any]], status: int) -> None:
+    fake_http[0]["responses"].extend([httpx.Response(status)] * 3)
+    p = OpenAICompatibleProvider(GEMINI_URL, FAKE_KEY, "m", timeout=5, max_retries=2)
+    with pytest.raises(ProviderError) as exc:
+        p.complete_json("sys", "user")
+    assert not isinstance(exc.value, ProviderRejected)
+    assert len(fake_http) - 1 == 3  # 1 attempt + 2 retries, unchanged by the 4xx rule
 
 
 def test_timeouts_are_retried_a_bounded_number_of_times(monkeypatch: pytest.MonkeyPatch) -> None:
