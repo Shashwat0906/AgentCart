@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.agents.parser import RequestParser, describe_intent
+from app.agents.parser import RequestParser, describe_intent, strip_budget_phrases
 
 P = RequestParser()
 
@@ -166,3 +166,30 @@ def test_preference_proposals() -> None:
 def test_describe_intent_has_no_duplicates() -> None:
     chips = describe_intent(P.parse("27 inch monitor"))
     assert len(chips) == len(set(chips))
+
+
+@pytest.mark.parametrize(
+    ("text", "keywords"),
+    [
+        ("laptop under 60000", "laptop"),
+        ("laptops under ₹60,000", "laptops"),
+        ("Under ₹60,000 Laptop", "Laptop"),
+        ("laptop below 60k", "laptop"),
+        ("laptop for rs 60000", "laptop"),
+        ("laptop around ₹60,000", "laptop"),
+        ("laptop above 60000", "laptop"),
+        ("laptop nothing over 60000", "laptop"),
+        ("laptop between 40000 and 60000", "laptop"),
+        ("laptop 40-60k", "laptop"),
+        ("laptop under 60000 with 16gb ram", "laptop with 16gb ram"),
+        # not budgets: units, resolutions and plain words are kept
+        ("phone 128gb", "phone 128gb"),
+        ("4k monitor", "4k monitor"),
+        ("noise cancelling", "noise cancelling"),
+        ("under 60000", ""),
+    ],
+)
+def test_strip_budget_phrases_removes_exactly_what_the_parser_reads_as_a_budget(text: str, keywords: str) -> None:
+    assert strip_budget_phrases(text) == keywords
+    stripped = RequestParser().parse(keywords) if keywords else None
+    assert stripped is None or (stripped.budget_max is None and stripped.budget_min is None)
