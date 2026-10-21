@@ -72,6 +72,11 @@ goal ─► RequestParser + validate_intent (deterministic intent and hard const
 * The tool's arguments are product ids only. Category, hard constraints (budget included) and stock come from the task. An unknown attribute counts as a failure.
 * Known cosmetic limitation (existing wording, unchanged): an attribute the product's category doesn't define is shown by its raw name, e.g. `ram gb unknown (you required RAM ≥ 16 GB)` for a mouse.
 
+### Quantity and per-item budget (owner decisions, 21 Oct 2026; PR #20, merged after #19)
+
+* **Budgets are per item:** a ₹3,000 budget limits each item's price. Summaries show the per-item price and the total (`cart_proposal_summary`). The approval card shows the per-item budget recorded with the proposal.
+* **Quantity applies only to the product the user names** (`parser.quantity_mentions` and `planner._cart_quantity`; task path only, the chat parser is unchanged). Two products with quantities, a quantity for another product, an unattributable quantity, or a quantity over `MAX_ITEM_QUANTITY` all produce a clarifying question before any research or model call.
+
 ### Notes from S5
 
 * **Owner decisions (21 Oct 2026):**

@@ -39,7 +39,7 @@ from app.providers.base import LLMProvider, ProviderError
 from app.services.catalog import ProductSnapshot, comparison_table
 from app.services.preferences import sensitive_reason
 from app.services.ranking import FilterResult, RankedProduct, filter_products, find_alternatives, rank_products
-from app.services.specs import CATEGORY_LABELS, format_inr
+from app.services.specs import CATEGORY_LABELS, cart_proposal_summary, format_inr
 
 logger = logging.getLogger("agentcart.agent")
 _parser = RequestParser()
@@ -383,7 +383,7 @@ def propose_actions(state: AgentState, deps: AgentDeps) -> dict[str, Any]:
                         "expected_price_inr": target.price_inr,
                         "product_name": target.name,
                     },
-                    "summary": f"Add {qty} × {target.name} ({format_inr(target.price_inr)} each) to your cart",
+                    "summary": cart_proposal_summary(qty, target.name, target.price_inr),
                 }
             )
         if state.get("response_type") == "cart_proposal":

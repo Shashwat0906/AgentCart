@@ -359,4 +359,22 @@ describe("Task controls", () => {
     expect(within(pending).queryByRole("button", { name: /Approve/ })).not.toBeInTheDocument(); // no re-proposal to approve
     expect(bodies(fetchMock, "/approve")).toHaveLength(1);
   });
+
+  it("shows the per-item price, the total and the per-item budget of a multi-unit proposal", async () => {
+    const proposal = {
+      id: "act-3", kind: "add_to_cart" as const, status: "pending" as const,
+      summary: "Add 10 × Logi M185 (₹799 each, ₹7,990 total) to your cart",
+      payload: { product_id: 41, quantity: 10, expected_price_inr: 799, budget_max_inr: 3000 }, result: {},
+      conversation_id: null, task_id: "a1", created_at: "2026-10-19T10:00:00Z", expires_at: "2026-10-19T10:30:00Z", decided_at: null,
+    };
+    const agent: ShoppingAgentTask = {
+      ...task(), id: "a1", kind: "shopping_agent", goal: "Agent: add 10 wireless mice under ₹3,000 to my cart",
+      input: { goal: "add 10 wireless mice under ₹3,000 to my cart", allow_proposals: true }, result: null, proposals: [proposal],
+    };
+    mockFetch((url) => (url.endsWith("/tasks") ? { body: [agent] } : url.endsWith("/categories") ? { body: CATEGORIES } : undefined));
+    renderWithProviders(<TasksPage />);
+    const card = within(await screen.findByTestId("task-proposals"));
+    expect(card.getByText("Add 10 × Logi M185 (₹799 each, ₹7,990 total) to your cart")).toBeInTheDocument();
+    expect(card.getByTestId("action-budget")).toHaveTextContent("Your budget: up to ₹3,000 per item");
+  });
 });

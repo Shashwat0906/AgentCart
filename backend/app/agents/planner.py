@@ -29,7 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError,
 
 from app.agents.guardrails import sanitize_user_text
 from app.agents.intent import ShoppingIntent
-from app.agents.parser import RequestParser
+from app.agents.parser import RequestParser, quantity_mentions
 from app.agents.validation import validate_intent
 from app.services.specs import CATEGORY_LABELS
 
@@ -116,7 +116,8 @@ def derive_intent(goal: AgentGoal, *, max_item_quantity: int) -> tuple[ShoppingI
     """Deterministic intent (category, budget, hard constraints) and any blocking questions.
 
     Uses the same sanitising, parsing and validation as the chat agent. An explicit budget can only
-    lower the budget found in the text; an explicit category replaces the parsed one.
+    lower the budget found in the text; an explicit category replaces the parsed one. A cart quantity above
+    `max_item_quantity` (when the task may propose) is a blocking question, asked before any research.
     """
     intent = RequestParser().parse(sanitize_user_text(goal.goal))
     if goal.category is not None:
@@ -125,7 +126,54 @@ def derive_intent(goal: AgentGoal, *, max_item_quantity: int) -> tuple[ShoppingI
         cap = goal.budget_max_inr if intent.budget_max is None else min(intent.budget_max, goal.budget_max_inr)
         intent = intent.model_copy(update={"budget_max": cap})
     result = validate_intent(intent, max_item_quantity=max_item_quantity)
-    return result.intent, [dict(q) for q in result.questions]
+    questions = [dict(q) for q in result.questions]
+    it = result.intent
+    if goal.allow_proposals and it.wants_cart_add:
+        it, question = _cart_quantity(it, goal.goal, max_item_quantity)
+        if question is not None:  # asked before any research; a quantity is never capped or moved silently
+            questions.append(question)
+    return it, questions
+
+
+def _cart_quantity(
+    intent: ShoppingIntent, text: str, max_item_quantity: int
+) -> tuple[ShoppingIntent, dict[str, Any] | None]:
+    """The quantity to propose, taken only from a quantity the user attached to the task's own product (or to
+    no product: "add 2 to my cart"), or a clarifying question when that isn't clear or is over the limit."""
+    wanted = CATEGORY_LABELS[intent.category].lower() if intent.category else "products"
+    mentions = quantity_mentions(sanitize_user_text(text))
+
+    def ask(qid: str, question: str) -> tuple[ShoppingIntent, dict[str, Any]]:
+        return intent, {"id": qid, "question": question[:300], "options": []}
+
+    named = {(n, cat) for n, cat in mentions}
+    if len({cat for _, cat in named if cat}) > 1 or len({n for n, _ in named}) > 1:
+        listed = ", ".join(f"{n} {CATEGORY_LABELS[c].lower() if c else 'units'}" for n, c in mentions)
+        return ask(
+            "quantity_ambiguous",
+            f"Your request mentions more than one quantity ({listed}). This task can propose one product: "
+            f"how many {wanted} would you like to add (1–{max_item_quantity})?",
+        )
+    other = next(((n, c) for n, c in mentions if c and c != intent.category), None)
+    if other is not None:
+        return ask(
+            "quantity_product",
+            f"You asked for {other[0]} {CATEGORY_LABELS[other[1]].lower()}, but this task is looking for {wanted}. "
+            f"How many {wanted} would you like to add (1–{max_item_quantity})?",
+        )
+    if mentions:
+        quantity = mentions[0][0]
+    elif intent.cart_quantity != 1:  # a number the parser read but can't tie to a product: don't guess
+        return ask("quantity_ambiguous", f"How many {wanted} would you like to add (1–{max_item_quantity})?")
+    else:
+        quantity = 1
+    if quantity > max_item_quantity:
+        return ask(
+            "quantity",
+            f"You asked for {quantity}, but at most {max_item_quantity} units of one product can be added to a "
+            f"cart. How many would you like (1–{max_item_quantity})?",
+        )
+    return intent.model_copy(update={"cart_quantity": quantity}), None
 
 
 # ------------------------------------------------------------------ state and the constraint-check contract

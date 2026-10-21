@@ -159,6 +159,13 @@ The last step is the built-in `final` or `clarify`. The result has:
 **Search bounds and quantity (every planner).**
 * `search_catalog` arguments are held to the task's category, budget and in-stock rule before a decision is checked or run. The step's `decision.clamped` lists the keys that were changed.
 * A proposal's quantity must equal the quantity read from the goal; any other value is refused with `invented_quantity`.
+* **Quantities belong to the product they name.** When the task may propose, the goal is checked before any research. A clarifying question is asked (the task ends as a `clarification`, with no tool calls) when:
+  * quantities are given for more than one product ("add 2 mice and 3 keyboards");
+  * a quantity belongs to another product ("… add 10 of the laptop" on a mouse task);
+  * the quantity is above `MAX_ITEM_QUANTITY`.
+
+  A quantity is never moved to another product or capped silently.
+* **Budgets are per item.** "under ₹3,000" limits each item's price, not the cart total. Proposal summaries always show the per-item price, and the total for more than one unit, e.g. "Add 2 × X (₹1,195 each, ₹2,390 total) to your cart". The approval card shows "Your budget: up to ₹3,000 per item".
 
 **Optional AI planner (`TASK_PLANNER=llm`, off by default).** It takes effect only when `LLM_PROVIDER` is a real model; with `mock`, tasks stay rule-based.
 * **What the model can do:** choose the next step only, from the offered tools.
