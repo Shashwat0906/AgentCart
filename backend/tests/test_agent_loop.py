@@ -613,8 +613,9 @@ def test_migration_0003_is_additive_and_keeps_existing_tasks(tmp_path: pathlib.P
                     "VALUES ('t-0002', 0, 'search', 'search_catalog', 'succeeded', 1, 3)"
                 )
             )
-        _alembic(backend, env, "upgrade", "head")
-        assert "0003 (head)" in _alembic(backend, env, "current")
+        _alembic(backend, env, "upgrade", "0003")
+        assert "0003" in _alembic(backend, env, "current")
+        _alembic(backend, env, "upgrade", "head")  # later migrations (0004+) build on 0003
         assert "No new upgrade operations detected" in _alembic(backend, env, "check")
         cols = {t: {c["name"]: c for c in inspect(engine).get_columns(t)} for t in ("agent_tasks", "agent_task_steps")}
         assert cols["agent_tasks"]["state"]["nullable"] and cols["agent_task_steps"]["decision"]["nullable"]

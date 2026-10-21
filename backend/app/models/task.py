@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import Boolean, CheckConstraint, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, JSONType, utcnow
+
+if TYPE_CHECKING:
+    from app.models.agent import AgentAction
 
 # "awaiting_approval" is reserved for later phases (approval-gated cart/checkout steps); Phase 2 never sets it.
 TASK_STATUSES = ("queued", "running", "succeeded", "failed", "cancelled", "awaiting_approval")
@@ -61,6 +64,9 @@ class AgentTask(Base):
     steps: Mapped[list[AgentTaskStep]] = relationship(
         back_populates="task", cascade="all, delete-orphan", order_by="AgentTaskStep.position"
     )
+    # Cart proposals this task made (S4). Read-only: actions are created by the propose tool and decided
+    # through the approval API, never through the task.
+    proposals: Mapped[list[AgentAction]] = relationship(viewonly=True, order_by="AgentAction.created_at")
 
 
 class AgentTaskStep(Base):
