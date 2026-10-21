@@ -174,3 +174,66 @@ def test_queries_without_a_use_case_are_not_reranked(
 )
 def test_strip_use_case_phrases(text: str, use_cases: list[str], kept: str) -> None:
     assert strip_use_case_phrases(text, use_cases) == kept
+
+
+# ------------------------------------------------------------------ developer phrasing and "purposes"
+CODING_PHRASES = [
+    "need a laptop for coding",  # the original production report
+    "need a laptop for coding purposes",
+    "need a laptop for Python coding",
+    "need a laptop for web development",
+    "need a laptop for app development",
+    "laptop for javascript and typescript",
+    "I need a laptop for coding purpose",
+]
+
+
+@pytest.mark.parametrize("query", CODING_PHRASES)
+def test_coding_phrasings_find_the_in_stock_laptops_under_50k(client: TestClient, query: str) -> None:
+    h = register(client)
+    t = research(client, h, category="laptops", query=query, max_price_inr=50_000)
+    truth = catalogue(client, category="laptops", max_price=50_000)
+    args = t["steps"][0]["args"]
+    assert (args["category"], args["max_price_inr"], args["in_stock"]) == ("laptops", 50_000, True)  # strict filters
+    res = t["result"]
+    assert res["matches"] == len(truth) == 4 and res["ranked_for"] == ["work"]
+    assert res["top"] and all(
+        p["id"] in truth and p["category"] == "laptops" and p["price_inr"] <= 50_000 and p["in_stock"]
+        for p in res["top"]
+    )
+
+
+@pytest.mark.parametrize("query", CODING_PHRASES[1:4])
+def test_the_new_phrasings_keep_genuine_no_matches(client: TestClient, query: str) -> None:
+    h = register(client)
+    cheap = research(client, h, category="laptops", query=query, max_price_inr=20_000)
+    assert cheap["steps"][0]["args"]["max_price_inr"] == 20_000 and cheap["result"]["matches"] == 0  # budget kept
+    wrong = research(client, h, category="mice", query=query)
+    assert wrong["steps"][0]["args"]["category"] == "mice" and wrong["result"]["matches"] == 0  # category kept
+
+
+def test_the_new_phrasings_still_exclude_out_of_stock_laptops(client: TestClient, db: Session) -> None:
+    h = register(client)
+    truth = catalogue(client, category="laptops", max_price=50_000)
+    gone = db.get(Product, next(iter(truth)))
+    assert gone is not None
+    gone.stock = 0
+    db.commit()
+    t = research(client, h, category="laptops", query="need a laptop for web development", max_price_inr=50_000)
+    assert t["result"]["matches"] == len(truth) - 1 and gone.id not in {p["id"] for p in t["result"]["top"]}
+
+
+def test_laptop_model_names_and_product_words_are_not_developer_terms(client: TestClient) -> None:
+    h = register(client)
+    swift = research(client, h, category="laptops", query="acer swift laptop")  # "Swift" is a model name
+    assert swift["steps"][0]["args"]["query"] == "acer swift laptop" and "ranked_for" not in swift["result"]
+    anc = research(client, h, category="headphones", query="noise cancelling headphones for python coding")
+    assert anc["steps"][0]["args"]["query"] == "noise cancelling headphones"  # product words still filter
+
+
+def test_the_shared_chat_parser_is_unchanged_by_research_phrasing() -> None:
+    """The developer vocabulary is research-only: chat parses these exactly as before."""
+    parse = RequestParser().parse
+    assert parse("need a laptop for web development").use_cases == []
+    assert parse("need a laptop for python").use_cases == []
+    assert parse("need a laptop for coding purposes").use_cases == ["work"]  # "coding" itself was always known

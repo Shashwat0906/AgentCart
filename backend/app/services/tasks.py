@@ -20,6 +20,7 @@ immediately, so a crash loses at most the step in flight:
 from __future__ import annotations
 
 import logging
+import re
 import time
 import uuid
 from collections.abc import Callable
@@ -797,7 +798,10 @@ def _research_terms(inp: dict[str, Any]) -> dict[str, Any]:
     use_cases: list[str] = []
     intent: ShoppingIntent | None = None
     if query:
-        intent = RequestParser().parse(sanitize_user_text(query))
+        # Developer phrasing reads as the parser's "coding" (its "work" use case). Research tasks only: the shared
+        # parser, and so chat, is unchanged.
+        query = _DEV_TERMS.sub(" coding ", sanitize_user_text(query))
+        intent = RequestParser().parse(query)
         if intent.budget_max is not None:
             cap = intent.budget_max if cap is None else min(cap, intent.budget_max)
         floor = intent.budget_min
@@ -805,6 +809,15 @@ def _research_terms(inp: dict[str, Any]) -> dict[str, Any]:
         # What the product is for ("for coding", "college") ranks the results; it isn't a required keyword.
         query = _product_words(strip_use_case_phrases(strip_budget_phrases(query), use_cases)) or None
     return {"query": query, "min_price_inr": floor, "max_price_inr": cap, "use_cases": use_cases, "intent": intent}
+
+
+# What people say they will develop or which language they code in. None of these is in any product's text, so as
+# required keywords they found nothing. Deliberately narrow: "swift" is left out (it is a laptop model name).
+_DEV_TERMS = re.compile(
+    r"(?<![\w-])(?:(?:web|app|apps|software|mobile|android|ios|game|full[- ]?stack|front[- ]?end|back[- ]?end)\s+"
+    r"(?:dev|development|developer|developers|programming)|python|java|javascript|typescript|golang|kotlin)(?![\w-])",
+    re.I,
+)
 
 
 def _ranking_intent(inp: dict[str, Any], terms: dict[str, Any]) -> ShoppingIntent | None:
@@ -882,6 +895,8 @@ _REQUEST_WORDS = frozenset(
         "to",
         "can",
         "could",
+        "purpose",
+        "purposes",
     ]
 )
 
