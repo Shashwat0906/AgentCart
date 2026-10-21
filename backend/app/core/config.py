@@ -55,6 +55,9 @@ class Settings(BaseSettings):
     hosted_llm_base_url: str = "https://api.groq.com/openai/v1"
     hosted_llm_api_key: str = ""
     hosted_llm_model: str = "llama-3.1-8b-instant"
+    # Optional, for endpoints that need them (e.g. Gemini: reasoning effort "none", JSON mode off). Unset = unchanged.
+    hosted_llm_reasoning_effort: Literal["", "none", "minimal", "low", "medium", "high"] = ""
+    hosted_llm_json_mode: bool = True
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-haiku-5-5"
 

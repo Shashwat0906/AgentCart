@@ -30,17 +30,34 @@ class OllamaProvider(LLMProvider):
 
 
 class OpenAICompatibleProvider(LLMProvider):
-    """Works with Groq, OpenRouter, Together, vLLM, LM Studio, Ollama's /v1, etc."""
+    """Works with Google Gemini's OpenAI-compatible endpoint, Groq, OpenRouter, Together, vLLM, LM Studio, Ollama's
+    /v1, etc.
+
+    `reasoning_effort` is sent only when set (Gemini 2.5 models "think" by default, which can use up the reply
+    budget; "none" turns that off). `json_mode=False` asks for JSON in the prompt instead of `response_format`, for
+    endpoints that don't accept `{"type": "json_object"}`; the reply is parsed the same way either way."""
 
     name = "openai_compatible"
 
-    def __init__(self, base_url: str, api_key: str, model: str, *, timeout: float = 20.0, max_retries: int = 2) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        model: str,
+        *,
+        timeout: float = 20.0,
+        max_retries: int = 2,
+        reasoning_effort: str = "",
+        json_mode: bool = True,
+    ) -> None:
         super().__init__(timeout=timeout, max_retries=max_retries)
         if not api_key:
             raise ProviderError("HOSTED_LLM_API_KEY is not set")
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
+        self.reasoning_effort = reasoning_effort
+        self.json_mode = json_mode
 
     def _complete(self, system: str, user: str, *, json_mode: bool, timeout: float) -> str:
         payload: dict[str, object] = {
@@ -49,8 +66,15 @@ class OpenAICompatibleProvider(LLMProvider):
             "max_tokens": 600,
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
         }
-        if json_mode:
+        if json_mode and self.json_mode:
             payload["response_format"] = {"type": "json_object"}
+        elif json_mode:
+            payload["messages"] = [
+                {"role": "system", "content": system + "\nRespond with a single JSON object only, no prose."},
+                {"role": "user", "content": user},
+            ]
+        if self.reasoning_effort:
+            payload["reasoning_effort"] = self.reasoning_effort
         data = self._post(
             f"{self.base_url}/chat/completions",
             payload,
@@ -60,6 +84,9 @@ class OpenAICompatibleProvider(LLMProvider):
         content = data["choices"][0]["message"]["content"]
         if not isinstance(content, str):
             raise ProviderError("unexpected response shape")
+        if not content.strip():
+            # e.g. a "thinking" model spent the whole token budget before answering
+            raise ProviderError("empty response")
         return content
 
 

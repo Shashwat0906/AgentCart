@@ -22,6 +22,21 @@ class ProviderError(RuntimeError):
     """Raised when a provider fails after its bounded retries."""
 
 
+class ProviderRejected(ProviderError):
+    """The provider refused the request: invalid request parameters (400), invalid key (401), no access or billing
+    required (402/403), or quota or rate limit reached (429). Retrying can't help and would only spend quota, so it is
+    raised at once. Timeouts and server errors (5xx) are still retried within LLM_MAX_RETRIES."""
+
+
+_REJECTED = {
+    400: "invalid request (check the model and request parameters)",
+    401: "invalid or missing API key",
+    402: "payment required",
+    403: "access denied",
+    429: "rate limit or quota reached",
+}
+
+
 class LLMProvider(ABC):
     name: str = "base"
     #: Whether the provider actually calls a model (mock does not).
@@ -54,6 +69,9 @@ class LLMProvider(ABC):
                 timeout = min(timeout, remaining)
             try:
                 return self._complete(system, user, json_mode=json_mode, timeout=timeout)
+            except ProviderRejected as exc:
+                logger.warning("%s rejected the request: %s", self.name, exc)  # status and meaning only
+                raise  # not retried: see ProviderRejected
             except (httpx.HTTPError, ProviderError, KeyError, ValueError, TypeError) as exc:
                 last = exc
                 logger.warning("%s attempt %d failed: %s", self.name, attempt + 1, type(exc).__name__)
@@ -66,6 +84,9 @@ class LLMProvider(ABC):
     ) -> dict[str, Any]:
         with httpx.Client(timeout=timeout or self.timeout) as client:
             resp = client.post(url, json=payload, headers=headers or {})
+        if resp.status_code in _REJECTED:
+            # The status only: never the response body (it can echo prompts) or the key.
+            raise ProviderRejected(f"{self.name} HTTP {resp.status_code}: {_REJECTED[resp.status_code]}")
         if resp.status_code >= 400:
             # Do not log response bodies: they can echo prompts.
             raise ProviderError(f"{self.name} HTTP {resp.status_code}")

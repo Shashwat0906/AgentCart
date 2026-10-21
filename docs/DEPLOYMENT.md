@@ -1,7 +1,7 @@
 # Deployment guide
 
-> **Status: not deployed.** Nothing has been created on any hosting provider. The files below are
-> ready to use; creating accounts and services is a manual step that needs the owner's approval.
+> **Status: deployed.** The API runs on Render (Blueprint `render.yaml`) and the frontend on Vercel, both deploying
+> automatically from `main`. `/api/health/ready` reports the deployed `commit`.
 
 ## Recommended free-tier setup
 
@@ -88,3 +88,39 @@ Any small VM with Docker can run the same stack as local development:
 * **Re-seeding** with `python -m app.seed --reset` restores demo prices and stock after demo orders.
 * **Logs** go to stdout. Unhandled exceptions are logged with stack traces server-side only.
 * **Scaling** beyond one instance needs a shared rate-limit store (see `docs/SECURITY.md`).
+
+
+## Optional: a free hosted LLM (Google Gemini)
+
+The app works fully without an LLM (`LLM_PROVIDER` unset or `mock`). A hosted model only helps the chat assistant
+understand requests and polish its replies; prices, stock, budgets and every other rule stay deterministic, and any
+provider error falls back to the rules for that message.
+
+**Keep it free.** A Gemini *chat* subscription is not API access. Create the key in Google AI Studio in a Google Cloud
+project **with no billing account**, and never enable billing on it: without billing, going over the free limits returns
+an error (HTTP 429, handled as "unavailable"), never a charge. On the free tier Google may use the content to improve its
+products, so don't put personal data in requests. Check the project's limits on AI Studio's rate-limit page.
+
+1. Google AI Studio (aistudio.google.com) → **Get API key** → create a key in a new project without billing.
+2. Render → service **agentcart-api** → **Environment** → add:
+
+   | Variable | Value |
+   | - | - |
+   | `LLM_PROVIDER` | `openai_compatible` |
+   | `HOSTED_LLM_BASE_URL` | `https://generativelanguage.googleapis.com/v1beta/openai` |
+   | `HOSTED_LLM_MODEL` | `gemini-2.5-flash-lite` (confirm it is still listed as free in AI Studio) |
+   | `HOSTED_LLM_API_KEY` | the key: add it as a **secret**, never in `render.yaml` or the repository |
+   | `HOSTED_LLM_REASONING_EFFORT` | `none` (Gemini 2.5 models otherwise "think" and can return an empty answer) |
+   | `HOSTED_LLM_JSON_MODE` | `false` (Gemini's compatibility layer isn't documented to accept `json_object`) |
+
+   Leave `TASK_PLANNER` unset (`rule_based`) unless you also want the AI planner for agent tasks.
+3. **Save and deploy**: the provider is created at start-up, so a deploy (restart) is required.
+4. Verify: `/api/health/ready` shows `"llm_provider":"openai_compatible"` and the expected `"commit"`. Send a chat
+   search. In the Render logs, `openai_compatible rejected the request: HTTP 401: invalid or missing API key` (or 403,
+   429) means the key or quota failed, `HTTP 400: invalid request` means a wrong model name or parameter, and `openai_compatible attempt N failed` means timeouts or outages; the chat
+   still answers using the rules.
+
+**Back to mock:** set `LLM_PROVIDER=mock` (or remove it) and deploy. A missing key also falls back to mock at start-up,
+and invalid requests (400), invalid keys (401/403), quota (429), timeouts and outages fall back to the rules per message;
+400/401/402/403/429 are not retried, so a bad parameter, a bad key or an exhausted quota doesn't spend more requests.
+Timeouts and server errors (5xx) are retried up to `LLM_MAX_RETRIES` times.
