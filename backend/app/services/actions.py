@@ -20,7 +20,7 @@ from app.core.errors import AppError, ConflictError, NotFoundError
 from app.models import AgentAction
 from app.services import cart as cart_service
 from app.services import preferences as pref_service
-from app.services.specs import format_inr
+from app.services.specs import cart_proposal_summary, format_inr
 
 
 class ActionGone(AppError):
@@ -177,7 +177,7 @@ def _execute_add_to_cart(db: Session, user_id: int, action: AgentAction, setting
                 {
                     "kind": "add_to_cart",
                     "payload": {**payload, "expected_price_inr": product.price_inr},
-                    "summary": f"Add {qty} × {product.name} ({format_inr(product.price_inr)} each) to your cart",
+                    "summary": cart_proposal_summary(qty, product.name, product.price_inr),
                 }
             ],
             settings,

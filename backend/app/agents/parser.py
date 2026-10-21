@@ -235,6 +235,70 @@ def _parse_money_token(token: str) -> int | None:
     return _amount(m.group(1), m.group(2)) if m else None
 
 
+_QTY_WORDS = {
+    "a couple of": 2,
+    "a pair of": 2,
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+}
+_QTY_NUM = r"(\d{1,4}|" + "|".join(re.escape(w) for w in sorted(_QTY_WORDS, key=len, reverse=True)) + r")"
+_QTY_PATTERNS = (
+    re.compile(rf"\b(?:add|buy|order|get|take|put|purchase)\s+(?:me\s+)?{_QTY_NUM}(?![\w-])", re.I),  # "add 20 …"
+    re.compile(rf"(?<![\w-]){_QTY_NUM}\s*(?:units?|pieces?|pcs|nos)\b", re.I),  # "20 units of …"
+    re.compile(rf"\b(?:quantity|qty)\s*(?:of|:|=|to)?\s*{_QTY_NUM}(?![\w-])", re.I),  # "quantity 3"
+    re.compile(rf"(?:,|&|\band\b|\bplus\b)\s*{_QTY_NUM}\s+(?=[a-z])", re.I),  # list item: "… and 3 keyboards"
+)
+# A number followed by one of these is a spec, a price or a duration, not a quantity: "16gb", "4k", "2 years".
+_NOT_A_QUANTITY = re.compile(
+    r"\s*(?:gb|tb|mb|inch(?:es)?|in\b|\"|hz|mp|mah|w\b|watts?|k\b|%|stars?|★|x\b|mm|ms|dpi|hours?|hrs?|days?|"
+    r"weeks?|months?|years?|yrs?|₹|rs\b|rupees?|-)",
+    re.I,
+)
+# Where the product a quantity belongs to stops: a new list item, a clause, or the cart / budget / context words.
+_QTY_SCOPE_END = re.compile(
+    r"[,.;!?&]|\b(?:and|plus|also|then|to|into|in|for|with|under|below|within|around|between|at|from)\b", re.I
+)
+
+
+def quantity_mentions(text: str) -> list[tuple[int, str | None]]:
+    """Each quantity the user asked for, with the category of the product it is attached to (None when no
+    product word follows it, e.g. "add 2 to my cart"). Prices, specs and durations are not quantities.
+
+    "add 20 wireless mice under ₹3,000"             -> [(20, "mice")]
+    "add 2 mice and 3 keyboards to my cart"          -> [(2, "mice"), (3, "keyboards")]
+    "a mouse under ₹3,000, add 10 of the laptop"     -> [(10, "laptops")]
+    "add a 16gb laptop" / "for my 2 kids"            -> []
+    """
+    low = text.lower()
+    found: dict[int, tuple[int, str | None]] = {}
+    for rx in _QTY_PATTERNS:
+        for m in rx.finditer(low):
+            start, end = m.start(1), m.end(1)
+            if start in found or _NOT_A_QUANTITY.match(low, end) or low[max(0, start - 1) : start] in ("₹", "#"):
+                continue
+            token = m.group(1)
+            n = int(token) if token.isdigit() else _QTY_WORDS[token]
+            scope = low[end : end + 60]
+            stop = _QTY_SCOPE_END.search(scope)
+            scope = scope[: stop.start()] if stop else scope
+            hits = sorted((h.start(), cat) for cat, crx in _CATEGORY_RES if (h := crx.search(scope)))
+            category = hits[0][1] if hits else None
+            if rx is _QTY_PATTERNS[3] and category is None:
+                continue  # a bare number in a list ("and 4") is only a quantity when a product follows
+            found[start] = (n, category)
+    return [found[k] for k in sorted(found)]
+
+
 _NEGATED_CUE = re.compile(r"\b(nothing|not|no|never)\s+$", re.I)
 
 

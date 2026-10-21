@@ -171,3 +171,12 @@ def format_inr(amount: int) -> str:
     if head:
         groups.insert(0, head)
     return f"{sign}₹{','.join(groups)},{tail}"
+
+
+def cart_proposal_summary(quantity: int, name: str, unit_price_inr: int) -> str:
+    """How a cart proposal is described everywhere. Budgets are per item, so the per-item price is always
+    shown; with more than one unit the total is shown too."""
+    price = f"{format_inr(unit_price_inr)} each"
+    if quantity > 1:
+        price += f", {format_inr(unit_price_inr * quantity)} total"
+    return f"Add {quantity} × {name} ({price}) to your cart"[:300]

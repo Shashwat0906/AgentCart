@@ -16,6 +16,16 @@ const STATUS: Record<AgentAction["status"], { label: string; cls: string }> = {
   superseded: { label: "Replaced by a newer proposal", cls: "border-line bg-paper-2 text-muted" },
 };
 
+/** The per-item budget a task recorded with its proposal (budgets apply to each item, not the cart total). */
+function budgetLabel(payload: Record<string, unknown>): string | null {
+  const max = typeof payload.budget_max_inr === "number" ? payload.budget_max_inr : null;
+  const min = typeof payload.budget_min_inr === "number" ? payload.budget_min_inr : null;
+  if (max !== null && min !== null) return `Your budget: ${formatINR(min)}–${formatINR(max)} per item`;
+  if (max !== null) return `Your budget: up to ${formatINR(max)} per item`;
+  if (min !== null) return `Your budget: at least ${formatINR(min)} per item`;
+  return null;
+}
+
 export function ApprovalCard({
   action,
   conversationId,
@@ -77,6 +87,9 @@ export function ApprovalCard({
         <span className={`chip ${status.cls}`} data-testid="action-status">{status.label}</span>
       </div>
       <p className="mt-2 font-medium">{current.summary}</p>
+      {budgetLabel(current.payload) && (
+        <p className="mt-1 text-xs text-muted" data-testid="action-budget">{budgetLabel(current.payload)}</p>
+      )}
       {current.status === "pending" && (
         <>
           <p className="mt-1 flex items-center gap-1.5 text-xs text-muted"><ShieldCheck size={13} aria-hidden /> Nothing changes until you approve. Price and stock are re-checked at that moment. <Clock size={13} aria-hidden /> Expires {new Date(current.expires_at).toLocaleTimeString("en-IN", { timeStyle: "short" })}.</p>

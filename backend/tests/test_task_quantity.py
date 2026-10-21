@@ -13,7 +13,8 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.agents.planner import AgentGoal, derive_intent
+from app.agents.parser import quantity_mentions
+from app.agents.planner import AgentGoal, _cart_quantity, derive_intent
 from app.core.config import get_settings
 from app.models import AgentAction, CartItem
 from app.services.tasks import TaskRunner
@@ -124,3 +125,113 @@ def test_the_propose_tool_still_refuses_over_limit_quantities(
     runner.run(tid)
     t = fetch(client, h, tid)
     assert t["proposals"] == [] and client.get("/api/cart", headers=h).json()["item_count"] == 0
+
+
+# ------------------------------------------------------------------ quantity belongs to the product it names
+@pytest.mark.parametrize(
+    ("text", "mentions"),
+    [
+        ("add 20 wireless mice under ₹3,000 to my cart", [(20, "mice")]),
+        ("add 2 mice and 3 keyboards to my cart", [(2, "mice"), (3, "keyboards")]),
+        ("a wireless mouse under ₹3,000. add 10 of the most expensive laptop to my cart", [(10, "laptops")]),
+        ("add a wireless mouse under ₹3,000 and 2 keyboards to my cart", [(2, "keyboards")]),
+        ("add two mice to my cart", [(2, "mice")]),
+        ("add 3 units of the keyboard to my cart", [(3, "keyboards")]),
+        ("add 2 to my cart", [(2, None)]),
+        # not quantities: prices, specs, counts of something else
+        ("add a wireless mouse under ₹3,000 to my cart", []),
+        ("add a 16gb laptop under ₹60,000 to my cart", []),
+        ("get 4k monitor and add it to my cart", []),
+        ("add a wireless mouse for my 2 kids to my cart", []),
+        ("add a wireless mouse with 3 buttons to my cart", []),
+        ("add a laptop with 2 years warranty under ₹60,000 to my cart", []),
+    ],
+)
+def test_quantity_mentions_are_tied_to_the_product_they_name(text: str, mentions: list[tuple[int, str | None]]) -> None:
+    assert quantity_mentions(text) == mentions
+
+
+@pytest.mark.parametrize(
+    ("goal", "qid", "quantity"),
+    [
+        ("add 2 mice and 3 keyboards to my cart", "quantity_ambiguous", None),
+        ("add 2 wireless mice and 2 keyboards to my cart", "quantity_ambiguous", None),
+        ("a wireless mouse under ₹3,000. add 10 of the most expensive laptop to my cart", "quantity_product", None),
+        ("add a wireless mouse under ₹3,000 and 2 keyboards to my cart", "quantity_product", None),
+        ("add 2 wireless mice under ₹3,000 to my cart", None, 2),
+        ("add two mice to my cart", None, 2),
+        ("add 2 to my cart, a wireless mouse under ₹3,000", None, 2),  # no product named: the task's product
+        ("add a wireless mouse for my 2 kids to my cart", None, 1),
+    ],
+)
+def test_a_quantity_is_never_moved_to_another_product(goal: str, qid: str | None, quantity: int | None) -> None:
+    intent, qs = derive_intent(AgentGoal(goal=goal, allow_proposals=True), max_item_quantity=10)
+    assert intent.category == "mice"
+    if qid is None:
+        assert qs == [] and intent.cart_quantity == quantity
+    else:
+        assert [q["id"] for q in qs] == [qid] and "(1–10)" in qs[0]["question"] and "mice" in qs[0]["question"]
+
+
+def test_a_quantity_the_parser_read_but_cannot_attribute_is_asked_about() -> None:
+    intent, _ = derive_intent(
+        AgentGoal(goal="add a wireless mouse to my cart", allow_proposals=True), max_item_quantity=10
+    )
+    _, question = _cart_quantity(intent.model_copy(update={"cart_quantity": 4}), "add a wireless mouse to my cart", 10)
+    assert question is not None and question["id"] == "quantity_ambiguous"
+
+
+@pytest.mark.parametrize(
+    ("goal", "qid"),
+    [
+        ("add 2 mice and 3 keyboards to my cart", "quantity_ambiguous"),
+        ("a wireless mouse under ₹3,000. add 10 of the most expensive laptop to my cart", "quantity_product"),
+        (TWENTY, "quantity"),
+    ],
+)
+def test_ambiguous_or_over_limit_quantities_are_asked_before_research_and_before_the_model(
+    client: TestClient, SessionLocal: sessionmaker[Session], goal: str, qid: str
+) -> None:
+    from app.agents.llm_planner import LLMPlanner
+    from tests.test_llm_planner import ScriptedProvider, follower
+
+    h = register(client)
+    tid = agent_task(SessionLocal, uid(client, h), {"goal": goal, "allow_proposals": True})
+    calls, provider = Calls(), ScriptedProvider(follower)
+    runner = TaskRunner(
+        SessionLocal,
+        get_settings(),
+        registry_factory=calls.registry,
+        sleep=lambda _s: None,
+        planner_factory=lambda: LLMPlanner(provider),  # even with the AI planner on
+    )
+    assert runner.run(tid) == "succeeded"
+    t = fetch(client, h, tid)
+    assert [s["tool"] for s in t["steps"]] == ["clarify"] and t["result"]["type"] == "clarification"
+    assert sum(calls.count.values()) == 0 and provider.calls == []  # no tool and no model call
+    assert t["proposals"] == []
+    with SessionLocal() as s:
+        assert counts(s, AgentAction, CartItem) == {"agent_actions": 0, "cart_items": 0}
+
+
+# ------------------------------------------------------------------ budgets are per item; summaries say so
+def test_a_multi_unit_proposal_shows_per_item_price_and_total_within_a_per_item_budget(client: TestClient) -> None:
+    h = register(client)
+    goal = {"goal": "add 2 wireless mice under ₹3,000 to my cart", "allow_proposals": True}
+    [p] = fetch(client, h, start_agent(client, h, goal).json()["id"])["proposals"]
+    unit, qty = p["payload"]["expected_price_inr"], p["payload"]["quantity"]
+    assert qty == 2 and unit <= 3_000 and p["payload"]["budget_max_inr"] == 3_000  # the budget is per item
+    from app.services.specs import format_inr
+
+    assert (
+        p["summary"]
+        == f"Add 2 × {p['payload']['product_name']} ({format_inr(unit)} each, {format_inr(unit * 2)} total) to your cart"
+    )
+
+
+def test_cart_proposal_summary_wording() -> None:
+    from app.services.specs import cart_proposal_summary
+
+    assert cart_proposal_summary(1, "Logi M185", 799) == "Add 1 × Logi M185 (₹799 each) to your cart"  # unchanged
+    assert cart_proposal_summary(10, "Logi M185", 799) == "Add 10 × Logi M185 (₹799 each, ₹7,990 total) to your cart"
+    assert len(cart_proposal_summary(2, "x" * 400, 1)) == 300

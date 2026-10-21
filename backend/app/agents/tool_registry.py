@@ -38,7 +38,7 @@ from app.services import cart as cart_service
 from app.services import catalog
 from app.services.catalog import SortKey
 from app.services.ranking import evaluate, violation_message
-from app.services.specs import CATEGORY_LABELS, format_inr
+from app.services.specs import CATEGORY_LABELS, cart_proposal_summary
 
 logger = logging.getLogger("agentcart.tools")
 
@@ -512,7 +512,7 @@ def _propose_add_to_cart(ctx: ToolContext, inp: ProposeAddToCartInput) -> dict[s
             **({"budget_max_inr": req.budget_max} if req.budget_max is not None else {}),
             **({"budget_min_inr": req.budget_min} if req.budget_min is not None else {}),
         },
-        summary=f"Add {inp.quantity} × {product.name} ({format_inr(product.price_inr)} each) to your cart"[:300],
+        summary=cart_proposal_summary(inp.quantity, product.name, product.price_inr),
         status="pending",
         result={},
         expires_at=datetime.now(UTC) + timedelta(minutes=ctx.settings.agent_action_ttl_minutes),
