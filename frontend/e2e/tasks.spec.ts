@@ -76,6 +76,26 @@ test("laptop research under ₹60,000 finds the catalogue's laptops even with th
   await expect(page.getByTestId("task-card")).toHaveCount(1); // no task was created
 });
 
+test("a sentence with a typed budget ('I need a laptop under ₹60,000') finds laptops within it", async ({ page }) => {
+  // Production report after PR #16: this exact input completed 4/4 with "0 matching products".
+  await registerViaUI(page);
+  await page.goto("/tasks");
+  const form = page.getByRole("form", { name: "New research task" });
+  await expect(form.getByRole("option", { name: "Laptops" })).toBeAttached();
+  await form.getByLabel("Category").selectOption("laptops");
+  await form.getByLabel("Looking for").fill("I need a laptop under ₹60,000");
+  await form.getByLabel("Maximum price (₹)").fill("60000");
+  await form.getByRole("button", { name: "Start research" }).click();
+
+  const card = page.getByTestId("task-card").first();
+  await expect(card.getByTestId("task-status")).toHaveText("Done", { timeout: 20_000 });
+  const result = card.getByTestId("task-result");
+  await expect(result).toContainText("7 matching products under ₹60,000");
+  const prices = await result.locator("li .tabular-nums").allTextContents();
+  expect(prices.length).toBeGreaterThan(0);
+  for (const p of prices) expect(Number(p.split("·")[0].replace(/[^\d]/g, ""))).toBeLessThanOrEqual(60_000);
+});
+
 test("tasks page requires sign in", async ({ page }) => {
   await page.goto("/tasks");
   await expect(page).toHaveURL(/\/login\?next=%2Ftasks/);

@@ -278,6 +278,57 @@ def test_summary_budget_check_includes_a_typed_minimum() -> None:
     assert summary["all_within_budget"] is False
 
 
+@pytest.mark.parametrize(
+    "query",
+    [
+        "I need a laptop under ₹60,000",  # the production report, verbatim
+        "I want a laptop under 60k",
+        "show me a good laptop under ₹60,000",
+        "please find the best laptop below 60000",
+        "looking for a laptop under ₹60,000",
+    ],
+)
+def test_a_sentence_with_a_typed_budget_finds_the_laptops_within_it(client: TestClient, query: str) -> None:
+    """Regression (production, after PR #16): the budget was read, but request words such as "need" stayed
+    required keywords; no product contains them, so the task reported 0 of the 7 laptops under ₹60,000."""
+    h = register(client)
+    inp = {"category": "laptops", "query": query, "max_price_inr": 60_000, "include_cart": True}
+    t = fetch(client, h, start(client, h, inp).json()["id"])
+    assert t["status"] == "succeeded" and t["current_step"] == t["total_steps"] == 4
+    args = t["steps"][0]["args"]
+    assert args["max_price_inr"] == 60_000 and args["category"] == "laptops"
+    truth = laptops_under(client, 60_000)
+    assert t["result"]["matches"] == len(truth) == 7
+    top = t["result"]["top"]
+    assert top and {p["id"] for p in top} <= set(truth)
+    assert all(p["category"] == "laptops" and p["price_inr"] <= 60_000 for p in top)
+    assert t["result"]["all_within_budget"] is True
+    assert t["input"]["query"] == query  # stored as typed
+
+
+def test_request_words_are_dropped_but_product_words_still_filter(client: TestClient) -> None:
+    h = register(client)
+    gaming = fetch(
+        client,
+        h,
+        start(client, h, {"category": "laptops", "query": "I need a gaming laptop under ₹60,000"}).json()["id"],
+    )
+    assert gaming["steps"][0]["args"]["query"] == "gaming laptop"
+    plain_gaming = fetch(
+        client,
+        h,
+        start(client, h, {"category": "laptops", "query": "gaming laptop", "max_price_inr": 60_000}).json()["id"],
+    )
+    assert gaming["result"]["matches"] == plain_gaming["result"]["matches"] < 7  # "gaming" still narrows
+    only_words = fetch(
+        client, h, start(client, h, {"category": "laptops", "query": "I need something good"}).json()["id"]
+    )
+    assert "query" not in only_words["steps"][0]["args"]  # nothing left to match: category search
+    assert only_words["result"]["matches"] == len(
+        client.get("/api/products", params={"category": "laptops", "in_stock": "true"}).json()["items"]
+    )
+
+
 def test_queries_without_a_budget_are_searched_unchanged(client: TestClient) -> None:
     h = register(client)
     for inp in (

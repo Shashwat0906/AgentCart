@@ -763,8 +763,63 @@ def _research_terms(inp: dict[str, Any]) -> dict[str, Any]:
         if intent.budget_max is not None:
             cap = intent.budget_max if cap is None else min(cap, intent.budget_max)
         floor = intent.budget_min
-        query = strip_budget_phrases(query) or None
+        query = _product_words(strip_budget_phrases(query)) or None
     return {"query": query, "min_price_inr": floor, "max_price_inr": cap}
+
+
+# How people phrase a request ("I need a …", "show me a good …"), not properties of a product. Every search
+# keyword must match, so leaving these in finds nothing ("need" is in no product's text).
+_REQUEST_WORDS = frozenset(
+    [
+        "i",
+        "i'm",
+        "im",
+        "me",
+        "my",
+        "we",
+        "us",
+        "you",
+        "please",
+        "pls",
+        "need",
+        "needs",
+        "want",
+        "wants",
+        "wanted",
+        "would",
+        "like",
+        "looking",
+        "look",
+        "searching",
+        "show",
+        "find",
+        "get",
+        "buy",
+        "purchase",
+        "recommend",
+        "suggest",
+        "some",
+        "something",
+        "any",
+        "good",
+        "great",
+        "nice",
+        "decent",
+        "best",
+        "a",
+        "an",
+        "the",
+        "for",
+        "to",
+        "can",
+        "could",
+    ]
+)
+
+
+def _product_words(text: str) -> str:
+    """`text` without request phrasing, keeping product words ("gaming laptop", "16gb", "noise cancelling")."""
+    return " ".join(w for w in text.split() if w.lower().strip(".,!?;:'\"") not in _REQUEST_WORDS)
 
 
 def _skip_reason(step: AgentTaskStep, inp: dict[str, Any], outputs: dict[str, dict[str, Any] | None]) -> str:
