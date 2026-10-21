@@ -525,3 +525,98 @@ def test_task_list_includes_live_proposals(client: TestClient) -> None:
     tid = start_agent(client, h, ADD_MOUSE).json()["id"]
     listed = {t["id"]: t for t in client.get("/api/tasks", headers=h).json()}
     assert [p["status"] for p in listed[tid]["proposals"]] == ["pending"]
+
+
+# ------------------------------------------------------------------ the task budget at approval time
+def _set_price(db: Session, product_id: int, price: int) -> None:
+    product = db.get(Product, product_id)
+    assert product is not None
+    product.mrp_inr = max(product.mrp_inr, price)  # the catalogue requires MRP >= price
+    product.price_inr = price
+    db.commit()
+
+
+def test_a_proposal_records_the_task_budget(client: TestClient) -> None:
+    h = register(client)
+    p = _proposal(client, h)
+    assert p["payload"]["budget_max_inr"] == 3_000 and "budget_min_inr" not in p["payload"]
+
+
+def test_a_price_rise_above_the_task_budget_fails_without_a_replacement(client: TestClient, db: Session) -> None:
+    h = register(client)
+    p = _proposal(client, h)
+    _set_price(db, p["payload"]["product_id"], 3_001)  # one rupee over the ₹3,000 budget
+    r = client.post(f"/api/actions/{p['id']}/approve", headers=h)
+    assert r.status_code == 409
+    err = r.json()["error"]
+    assert err["details"]["reason"] == "outside_budget" and "new_action_id" not in err["details"]
+    assert err["details"]["new_price_inr"] == 3_001 and err["details"]["budget_max_inr"] == 3_000
+    assert "₹3,000" in err["message"] and "No new proposal" in err["message"]
+    assert [(a["status"], a["result"].get("reason")) for a in fetch(client, h, p["task_id"])["proposals"]] == [
+        ("failed", "outside_budget")
+    ]
+    assert client.get("/api/actions", headers=h, params={"status": "pending"}).json() == []
+    assert cart_lines(client, h) == []
+
+
+def test_a_price_change_within_the_budget_is_reproposed_and_the_budget_carries_over(
+    client: TestClient, db: Session
+) -> None:
+    h = register(client)
+    p = _proposal(client, h)
+    pid = p["payload"]["product_id"]
+    _set_price(db, pid, 3_000)  # exactly the budget: still allowed
+    r = client.post(f"/api/actions/{p['id']}/approve", headers=h)
+    assert r.status_code == 409 and r.json()["error"]["details"]["reason"] == "price_changed"
+    fresh = r.json()["error"]["details"]["new_action_id"]
+    [replacement] = [a for a in fetch(client, h, p["task_id"])["proposals"] if a["id"] == fresh]
+    assert replacement["payload"]["budget_max_inr"] == 3_000 and replacement["payload"]["expected_price_inr"] == 3_000
+
+    _set_price(db, pid, 3_500)  # rises again before the replacement is approved: no further replacement
+    r2 = client.post(f"/api/actions/{fresh}/approve", headers=h)
+    assert r2.status_code == 409 and r2.json()["error"]["details"]["reason"] == "outside_budget"
+    statuses = sorted(a["status"] for a in fetch(client, h, p["task_id"])["proposals"])
+    assert statuses == ["failed", "superseded"]  # never a pending proposal above the budget
+    assert cart_lines(client, h) == []
+
+
+def test_a_price_drop_below_a_typed_minimum_fails_too(client: TestClient, db: Session) -> None:
+    h = register(client)
+    goal = {"goal": "add a wireless mouse between ₹1,000 and ₹3,000 to my cart", "allow_proposals": True}
+    [p] = fetch(client, h, start_agent(client, h, goal).json()["id"])["proposals"]
+    assert (p["payload"]["budget_min_inr"], p["payload"]["budget_max_inr"]) == (1_000, 3_000)
+    _set_price(db, p["payload"]["product_id"], 999)
+    r = client.post(f"/api/actions/{p['id']}/approve", headers=h)
+    assert r.status_code == 409 and r.json()["error"]["details"]["reason"] == "outside_budget"
+    assert cart_lines(client, h) == []
+
+
+# ------------------------------------------------------------------ expiry
+def test_an_expired_proposal_reads_as_expired_and_cannot_be_decided(client: TestClient, db: Session) -> None:
+    h = register(client)
+    p = _proposal(client, h)
+    row = db.get(AgentAction, p["id"])
+    assert row is not None
+    row.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    db.commit()
+    # shown as expired everywhere before anyone acts on it, so no Approve button is offered
+    assert [a["status"] for a in fetch(client, h, p["task_id"])["proposals"]] == ["expired"]
+    assert client.get("/api/actions", headers=h, params={"status": "pending"}).json() == []
+    assert [a["id"] for a in client.get("/api/actions", headers=h, params={"status": "expired"}).json()] == [p["id"]]
+    for op in ("approve", "reject"):
+        r = client.post(f"/api/actions/{p['id']}/{op}", headers=h)
+        assert r.status_code == 410 and r.json()["error"]["details"]["status"] == "expired", op
+    db.refresh(row)
+    assert row.status == "expired" and row.decided_at is not None
+    assert cart_lines(client, h) == []
+
+
+def test_a_proposal_is_approvable_until_it_expires(client: TestClient, db: Session) -> None:
+    h = register(client)
+    p = _proposal(client, h)
+    row = db.get(AgentAction, p["id"])
+    assert row is not None
+    row.expires_at = datetime.now(UTC) + timedelta(seconds=30)
+    db.commit()
+    assert client.post(f"/api/actions/{p['id']}/approve", headers=h).status_code == 200
+    assert cart_lines(client, h) == [(p["payload"]["product_id"], 1)]

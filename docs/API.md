@@ -66,7 +66,7 @@ Every cart response carries server-computed totals: `subtotal_inr`, `shipping_in
 | GET | `/conversations/{id}` | Messages with structured payloads and their actions |
 | DELETE | `/conversations/{id}` | — |
 | GET | `/actions?status=pending` | The caller's proposed actions |
-| POST | `/actions/{id}/approve` | Executes after revalidation. 409 `price_changed` returns `new_action_id`; 409 for stock problems; 410 if not pending or expired. Concurrent or repeated approve/reject requests for one action are serialised by a row lock: the first decides, the rest get 410 and change nothing. |
+| POST | `/actions/{id}/approve` | Executes after revalidation. 409 `price_changed` returns `new_action_id`; 409 for stock problems; 410 if not pending or expired. Concurrent or repeated approve/reject requests for one action are serialised by a row lock: the first decides, the rest get 410 and change nothing. For a task's proposal, a price now outside the task's budget (`budget_max_inr` / `budget_min_inr` recorded in the payload) fails the action with 409 `outside_budget`, without adding it to the cart or creating a new proposal. |
 | POST | `/actions/{id}/reject` | — |
 
 The assistant message `payload` contains:
@@ -161,7 +161,11 @@ The last step is the built-in `final` or `clarify`. The result has:
 * Before creating anything, the tool re-checks the product against the task's own requirements and checks the quantity against `MAX_ITEM_QUANTITY` and stock.
 * It creates one **pending** `add_to_cart` action, at most `TASK_MAX_PROPOSALS` (default 1) per task. The cart is not changed.
 * The task still ends `succeeded` and lists the proposal in `result.proposals`. Its live status is in the task's `proposals`.
-* Approve or reject it with `POST /actions/{id}/approve` or `/reject`. Approval re-checks price (a change creates a new proposal for the same task) and stock.
+* Approve or reject it with `POST /actions/{id}/approve` or `/reject`. Approval re-checks the price and stock:
+  * A price change creates a new proposal for the same task, but only if the new price is still within the task's budget.
+  * A price outside the budget fails the action with 409 `outside_budget`, and no replacement is created.
+* An action past its `expires_at` is reported as `expired` everywhere (including `GET /actions?status=…`) and can't be approved or rejected (410).
+* A new chat proposal supersedes only actions that are still `pending` when it commits. An action being approved at that moment keeps its result.
 * A proposal is tied to the step that made it (`agent_actions.task_step_id` is unique). If that step runs again after a resume or retry, it returns the same proposal (`reused: true`) instead of creating another.
 * `product_research` tasks can never propose. There is no checkout tool and no permission that changes the cart.
 

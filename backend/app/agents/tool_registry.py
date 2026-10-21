@@ -170,10 +170,19 @@ class TaskConstraints:
 
     category: str | None
     hard: tuple[Constraint, ...]
+    # The budget on its own as well (it is also among `hard`), so a proposal can record it and approval can
+    # re-check a changed price against it.
+    budget_max: int | None = None
+    budget_min: int | None = None
 
     @classmethod
     def from_intent(cls, intent: ShoppingIntent) -> TaskConstraints:
-        return cls(category=intent.category, hard=tuple(intent.hard_constraints()))
+        return cls(
+            category=intent.category,
+            hard=tuple(intent.hard_constraints()),
+            budget_max=intent.budget_max,
+            budget_min=intent.budget_min,
+        )
 
     def labels(self) -> list[str]:
         out = [f"Category: {CATEGORY_LABELS[self.category]}"] if self.category else []
@@ -499,6 +508,9 @@ def _propose_add_to_cart(ctx: ToolContext, inp: ProposeAddToCartInput) -> dict[s
             "quantity": inp.quantity,
             "expected_price_inr": product.price_inr,
             "product_name": product.name,
+            # the task's budget, re-checked at approval if the price changes (never re-proposed outside it)
+            **({"budget_max_inr": req.budget_max} if req.budget_max is not None else {}),
+            **({"budget_min_inr": req.budget_min} if req.budget_min is not None else {}),
         },
         summary=f"Add {inp.quantity} × {product.name} ({format_inr(product.price_inr)} each) to your cart"[:300],
         status="pending",

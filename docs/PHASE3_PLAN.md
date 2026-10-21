@@ -78,6 +78,14 @@ goal ─► RequestParser + validate_intent (deterministic intent and hard const
   * `task_step_id`: nullable, **unique**, foreign key to `agent_task_steps` with `ON DELETE SET NULL`.
   * Tested on SQLite and PostgreSQL: existing rows are kept, downgrade keeps every action, and re-upgrade plus `alembic check` are clean.
 * **Approval race fixed.** `approve` and `reject` now lock the action row before checking its status. Previously, two concurrent approvals could both add to the cart on PostgreSQL, and a racing reject could relabel an executed action. There is a PostgreSQL test for both cases.
+* **Follow-up from the S4 review:**
+  * **Budget re-check at approval.** A proposal records the task's budget (`budget_max_inr` and `budget_min_inr`). If the price changes, a new price outside the budget fails the action with `outside_budget`, and no replacement is created.
+  * **Chat replacements.** Superseding older chat proposals is now one conditional `UPDATE … WHERE status = 'pending'`. Previously it selected, then updated, which could overwrite an action that had just been executed.
+  * **`_fail` re-locks the action** after its rollback.
+  * **Expired actions** are reported as `expired` before anyone acts on them.
+  * **Cart creation race.** Two simultaneous first cart writes for the same user no longer fail on the unique `carts.user_id` (fixed with a savepoint).
+  * **New PostgreSQL tests** cover the chat-replacement race, the first-cart race, and a mixed-load run (approvals, rejections, chat proposals and direct adds, checking for deadlocks and lost cart changes; 10 out of 10 runs clean).
+  * **Lock order** is unchanged: action, then product, then cart rows. Checkout locks products in sorted order, then cart rows. Nothing locks an action after a product, so there is no deadlock cycle.
 * **Proposals are idempotent per step.** The tool returns the step's existing proposal. The database's unique step link backs this up, and the proposal is committed together with the step's success.
 * **The registry write guard** lets a propose tool create new pending `AgentAction` rows only. Anything else is rolled back as `write_attempted`.
 * **S3 tests updated for S4.** Three S3 tests pinned "no proposals" (the registry refusing `propose`, the loop never proposing, no new `agent_actions` rows). They now assert the S4 rule instead: `propose` registers but `execute` and `write` don't; an opted-in task creates exactly one pending action; the cart is never changed.

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
@@ -16,9 +17,16 @@ from app.services.catalog import key_specs
 def get_or_create_cart(db: Session, user_id: int) -> Cart:
     cart = db.scalar(select(Cart).where(Cart.user_id == user_id))
     if cart is None:
-        cart = Cart(user_id=user_id)
-        db.add(cart)
-        db.flush()
+        try:
+            with db.begin_nested():  # savepoint: losing the race below must not abort the caller's transaction
+                cart = Cart(user_id=user_id)
+                db.add(cart)
+                db.flush()
+        except IntegrityError:
+            # A concurrent request created this user's cart first (carts.user_id is unique): use that one.
+            cart = db.scalar(select(Cart).where(Cart.user_id == user_id))
+            if cart is None:  # pragma: no cover - the conflicting row must exist once its insert committed
+                raise
     return cart
 
 

@@ -326,4 +326,37 @@ describe("Task controls", () => {
     expect(bodies(fetchMock, "/actions/act-1/approve")).toHaveLength(1);
     expect(within(card).queryByRole("button", { name: "Run again" })).not.toBeInTheDocument();
   });
+
+  it("offers no Approve button for an expired task proposal, and shows a budget refusal without a new proposal", async () => {
+    const base = {
+      kind: "add_to_cart" as const, summary: "Add 1 × Logi M185 (₹799 each) to your cart",
+      payload: { product_id: 41, quantity: 1, expected_price_inr: 799, budget_max_inr: 3000 }, result: {},
+      conversation_id: null, task_id: "a1", created_at: "2026-10-19T10:00:00Z", expires_at: "2026-10-19T10:30:00Z", decided_at: null,
+    };
+    const agent: ShoppingAgentTask = {
+      ...task(), id: "a1", kind: "shopping_agent", goal: "Agent: add a mouse", input: { goal: "add a mouse", allow_proposals: true },
+      result: null, proposals: [{ ...base, id: "old", status: "expired" }, { ...base, id: "act-2", status: "pending" }],
+    };
+    const message = "The price of Logi M185 is now ₹3,499, outside your budget (up to ₹3,000). Nothing was added to your cart. No new proposal was made.";
+    const fetchMock = mockFetch((url) => {
+      if (url.endsWith("/tasks")) return { body: [agent] };
+      if (url.endsWith("/categories")) return { body: CATEGORIES };
+      if (url.endsWith("/actions/act-2/approve")) {
+        return { status: 409, body: { error: { code: "conflict", message, details: { reason: "outside_budget", new_price_inr: 3499, budget_max_inr: 3000 } } } };
+      }
+      return undefined;
+    });
+    renderWithProviders(<TasksPage />);
+    const cards = within(await screen.findByTestId("task-proposals")).getAllByRole("region", { name: "Proposed action" });
+    expect(cards).toHaveLength(2);
+    const [expired, pending] = cards as [HTMLElement, HTMLElement];
+    expect(within(expired).getByTestId("action-status")).toHaveTextContent("Expired");
+    expect(within(expired).queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
+
+    await userEvent.click(within(pending).getByRole("button", { name: "Approve" }));
+    await waitFor(() => expect(within(pending).getByRole("alert")).toHaveTextContent("outside your budget"));
+    expect(within(pending).getByTestId("action-status")).toHaveTextContent("Couldn't complete");
+    expect(within(pending).queryByRole("button", { name: /Approve/ })).not.toBeInTheDocument(); // no re-proposal to approve
+    expect(bodies(fetchMock, "/approve")).toHaveLength(1);
+  });
 });

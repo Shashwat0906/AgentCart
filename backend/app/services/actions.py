@@ -12,7 +12,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
@@ -41,11 +41,15 @@ def persist_actions(
 ) -> list[AgentAction]:
     if proposals and conversation_id:
         # Older pending proposals in this conversation are superseded so stale ones can't be approved later.
-        for old in db.scalars(
-            select(AgentAction).where(AgentAction.conversation_id == conversation_id, AgentAction.status == "pending")
-        ):
-            old.status = "superseded"
-            old.decided_at = _now()
+        # One conditional UPDATE, not select-then-update: if a proposal is being approved or rejected right now,
+        # this waits for that decision and then re-checks `status = 'pending'`, so a just-executed action keeps
+        # its status instead of being relabelled "superseded" after the cart changed.
+        db.execute(
+            update(AgentAction)
+            .where(AgentAction.conversation_id == conversation_id, AgentAction.status == "pending")
+            .values(status="superseded", decided_at=_now())
+            .execution_options(synchronize_session="fetch")
+        )
     out = []
     for p in proposals:
         action = AgentAction(
@@ -82,8 +86,19 @@ def _lock_owned(db: Session, user_id: int, action_id: str) -> AgentAction:
     return action
 
 
+def effective_status(a: AgentAction) -> str:
+    """The status the owner sees: a pending action past its expiry is "expired" even before anyone has tried to
+    decide it (the stored status is updated the first time someone does, under the action's row lock)."""
+    if a.status == "pending" and _aware(a.expires_at) <= _now():
+        return "expired"
+    return a.status
+
+
 def list_actions(db: Session, user_id: int, status: str | None = None) -> list[AgentAction]:
     stmt = select(AgentAction).where(AgentAction.user_id == user_id).order_by(AgentAction.created_at.desc())
+    if status in ("pending", "expired"):  # by effective status: expired-but-unvisited actions are "expired"
+        stmt = stmt.where(AgentAction.status.in_(("pending", "expired")))
+        return [a for a in db.scalars(stmt) if effective_status(a) == status][:100]
     if status:
         stmt = stmt.where(AgentAction.status == status)
     return list(db.scalars(stmt.limit(100)))
@@ -120,7 +135,11 @@ def approve(db: Session, user_id: int, action_id: str, settings: Settings) -> Ag
 
 
 def _fail(db: Session, action: AgentAction, reason: str, extra: dict[str, Any] | None = None) -> None:
-    db.rollback()  # discard partial cart changes; `action` stays attached to the session
+    db.rollback()  # discard partial cart changes; this also ends the transaction holding the action's row lock …
+    db.refresh(action, with_for_update=True)  # … so lock and re-read it before recording the failure
+    if action.status != "pending":  # another request decided it in that instant: keep its decision
+        db.commit()
+        return
     action.status = "failed"
     action.decided_at = _now()
     action.result = {"reason": reason, **(extra or {})}
@@ -136,6 +155,16 @@ def _execute_add_to_cart(db: Session, user_id: int, action: AgentAction, setting
         _fail(db, action, "product_not_found")
         raise ConflictError("That product no longer exists") from None
 
+    budget = _budget_problem(payload, product.price_inr)
+    if budget is not None:
+        # The task's budget still applies: never add, and never re-propose, a product outside it.
+        details = {"reason": "outside_budget", "old_price_inr": expected, "new_price_inr": product.price_inr, **budget}
+        _fail(db, action, "outside_budget", details)
+        raise ConflictError(
+            f"The price of {product.name} is now {format_inr(product.price_inr)}, outside your budget "
+            f"({_budget_label(budget)}). Nothing was added to your cart. No new proposal was made.",
+            details=details,
+        )
     if product.price_inr != expected:
         action.status = "superseded"
         action.decided_at = _now()
@@ -177,6 +206,21 @@ def _execute_add_to_cart(db: Session, user_id: int, action: AgentAction, setting
     db.commit()
 
 
+def _budget_problem(payload: dict[str, Any], price: int) -> dict[str, int] | None:
+    """The budget recorded with a task's proposal, if `price` is now outside it (chat proposals record none)."""
+    cap, floor = payload.get("budget_max_inr"), payload.get("budget_min_inr")
+    if (cap is not None and price > int(cap)) or (floor is not None and price < int(floor)):
+        return {k: int(v) for k, v in (("budget_max_inr", cap), ("budget_min_inr", floor)) if v is not None}
+    return None
+
+
+def _budget_label(b: dict[str, int]) -> str:
+    lo, hi = b.get("budget_min_inr"), b.get("budget_max_inr")
+    if lo is not None and hi is not None:
+        return f"{format_inr(lo)}–{format_inr(hi)}"
+    return f"up to {format_inr(hi)}" if hi is not None else f"at least {format_inr(lo or 0)}"
+
+
 def _execute_save_preference(db: Session, user_id: int, action: AgentAction) -> None:
     p = action.payload
     try:
@@ -194,7 +238,7 @@ def action_view(a: AgentAction) -> dict[str, Any]:
     return {
         "id": a.id,
         "kind": a.kind,
-        "status": a.status,
+        "status": effective_status(a),
         "summary": a.summary,
         "payload": a.payload,
         "result": a.result or {},
