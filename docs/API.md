@@ -24,7 +24,7 @@ Base path `/api`. Interactive docs are at `/api/docs` when `ENVIRONMENT` is not 
 | Method | Path | Description |
 |---|---|---|
 | GET | `/health` | Liveness |
-| GET | `/health/ready` | Database check, product count, active LLM provider (503 if the DB is down) |
+| GET | `/health/ready` | Database check, product count, active LLM provider (503 if the DB is down), and `commit`: the deployed git commit from Render's `RENDER_GIT_COMMIT`. Only a lowercase hex hash (7–40 characters) is returned, otherwise `null`; no other environment value is exposed. |
 | GET | `/config/public` | Ranking weight defaults, quantity limit, shipping rules, provider name |
 
 ## Auth
@@ -125,7 +125,7 @@ A task is multi-step agent work that runs in the background and survives restart
 
 A budget written in `query` ("laptop under ₹60,000", "below 60k", "between 40,000 and 60,000") is read by the same deterministic parser as chat: it becomes a price limit that can only lower `max_price_inr` (a typed minimum such as "above ₹60,000" is enforced too, and one above `max_price_inr` is rejected with 422 instead of being dropped), and it is removed from the search keywords (every keyword must match a product). The stored `input` keeps the text as typed.
 
-**Use cases rank; they don't filter.** Words saying what the product is for ("for coding", "programming", "office", "college", "gaming", "travel" …) are read by the same parser as chat. They are removed from the search keywords, because no product's text contains "coding". Instead, the whole matching shortlist (up to 48) is ordered with the chat agent's ranking for that use case: for example more RAM for coding, a dedicated GPU for gaming, or battery life and weight for college. The result's `ranked_for` lists the use cases, e.g. `["work"]`. Category, price (`max_price_inr` and typed budgets), stock and rating stay strict filters; nothing is added. Other words, such as "noise cancelling" or "wireless", are still required keywords.
+**Use cases rank; they don't filter.** Words saying what the product is for ("for coding", "programming", "office", "college", "gaming", "travel" …) are read by the same parser as chat. They are removed from the search keywords, because no product's text contains "coding". Instead, the whole matching shortlist (up to 48) is ordered with the chat agent's ranking for that use case: for example more RAM for coding, a dedicated GPU for gaming, or battery life and weight for college. The result's `ranked_for` lists the use cases, e.g. `["work"]`. Category, price (`max_price_inr` and typed budgets), stock and rating stay strict filters; nothing is added. Developer phrasing ("web/app/software development", "Python", "Java", "JavaScript", "TypeScript", "Golang", "Kotlin") counts as coding (the "work" use case) in research tasks only; the chat parser is unchanged. "purpose(s)" counts as a request word. Other words, such as "noise cancelling" or "wireless", are still required keywords.
 
 Steps: `search` (`search_catalog`) → `compare` (`compare_products`; skipped when fewer than 2 products match) → `cart` (`read_cart`, optional) → `summarize` (built in, deterministic). The result has `matches`, `top`, `best` (lowest price / best rated), `cart` and `all_within_budget`.
 

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import math
+import os
+import re
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query
@@ -43,12 +45,26 @@ def health() -> dict[str, str]:
 
 @router.get("/health/ready", tags=["health"])
 def ready(db: Session = Depends(get_db), provider: LLMProvider = Depends(get_provider)) -> JSONResponse:
+    commit = deployed_commit()
     try:
         db.execute(text("SELECT 1"))
         products = db.scalar(select(func.count()).select_from(Product)) or 0
     except Exception:
-        return JSONResponse({"status": "unavailable", "database": "down"}, status_code=503)
-    return JSONResponse({"status": "ready", "database": "up", "products": products, "llm_provider": provider.name})
+        return JSONResponse({"status": "unavailable", "database": "down", "commit": commit}, status_code=503)
+    return JSONResponse(
+        {"status": "ready", "database": "up", "products": products, "llm_provider": provider.name, "commit": commit}
+    )
+
+
+_COMMIT = re.compile(r"[0-9a-f]{7,40}")
+
+
+def deployed_commit() -> str | None:
+    """The git commit this instance was built from, from Render's built-in RENDER_GIT_COMMIT, so a deployment can be
+    matched to a commit. Only a lowercase hex hash (7-40 characters) is ever returned; anything else is None, so
+    no other environment value can leak through this field."""
+    value = os.environ.get("RENDER_GIT_COMMIT", "").strip()
+    return value if _COMMIT.fullmatch(value) else None
 
 
 # ------------------------------------------------------------------ auth
