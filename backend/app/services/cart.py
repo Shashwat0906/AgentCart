@@ -5,7 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
@@ -17,16 +18,15 @@ from app.services.catalog import key_specs
 def get_or_create_cart(db: Session, user_id: int) -> Cart:
     cart = db.scalar(select(Cart).where(Cart.user_id == user_id))
     if cart is None:
-        try:
-            with db.begin_nested():  # savepoint: losing the race below must not abort the caller's transaction
-                cart = Cart(user_id=user_id)
-                db.add(cart)
-                db.flush()
-        except IntegrityError:
-            # A concurrent request created this user's cart first (carts.user_id is unique): use that one.
-            cart = db.scalar(select(Cart).where(Cart.user_id == user_id))
-            if cart is None:  # pragma: no cover - the conflicting row must exist once its insert committed
-                raise
+        # INSERT … ON CONFLICT DO NOTHING: if a concurrent request is creating this user's cart (carts.user_id is
+        # unique), this waits for it and then inserts nothing, instead of failing. Part of the caller's
+        # transaction, so a later rollback removes a cart created here (no savepoint: SQLite's driver would
+        # commit it on release).
+        insert = pg_insert if db.get_bind().dialect.name == "postgresql" else sqlite_insert
+        db.execute(insert(Cart).values(user_id=user_id).on_conflict_do_nothing(index_elements=[Cart.user_id]))
+        cart = db.scalar(select(Cart).where(Cart.user_id == user_id))
+        if cart is None:  # pragma: no cover - inserted above, or by the request that won the race
+            raise RuntimeError("cart was neither created nor found")
     return cart
 
 

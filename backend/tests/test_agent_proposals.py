@@ -620,3 +620,123 @@ def test_a_proposal_is_approvable_until_it_expires(client: TestClient, db: Sessi
     db.commit()
     assert client.post(f"/api/actions/{p['id']}/approve", headers=h).status_code == 200
     assert cart_lines(client, h) == [(p["payload"]["product_id"], 1)]
+
+
+# ------------------------------------------------------------------ never re-proposed above the task budget
+@pytest.mark.parametrize(
+    ("new_price", "outcome"),
+    [
+        (1_500, "price_changed"),
+        (2_999, "price_changed"),
+        (3_000, "price_changed"),
+        (3_001, "outside_budget"),
+        (9_999, "outside_budget"),
+    ],
+)
+def test_a_task_proposal_is_never_reproposed_above_the_original_budget(
+    client: TestClient, db: Session, new_price: int, outcome: str
+) -> None:
+    """Regression: before the review fix, any price change created a replacement at the new price, even one
+    above the ₹3,000 the task was limited to. Now no pending proposal can exist above the task's budget."""
+    h = register(client)
+    p = _proposal(client, h)
+    assert p["payload"]["budget_max_inr"] == 3_000
+    _set_price(db, p["payload"]["product_id"], new_price)
+    r = client.post(f"/api/actions/{p['id']}/approve", headers=h)
+    assert r.status_code == 409 and r.json()["error"]["details"]["reason"] == outcome
+    proposals = fetch(client, h, p["task_id"])["proposals"]
+    pending = [a for a in proposals if a["status"] == "pending"]
+    if outcome == "price_changed":
+        assert [a["payload"]["expected_price_inr"] for a in pending] == [new_price]
+        assert pending[0]["payload"]["budget_max_inr"] == 3_000 and pending[0]["task_id"] == p["task_id"]
+    else:
+        assert pending == [] and "new_action_id" not in r.json()["error"]["details"]
+    assert all(a["payload"]["expected_price_inr"] <= a["payload"]["budget_max_inr"] for a in pending)
+    assert len(client.get("/api/actions", headers=h).json()) == len(proposals)  # nothing created elsewhere
+    assert cart_lines(client, h) == []
+
+
+def test_a_task_without_a_budget_still_reproposes_at_a_new_price(client: TestClient, db: Session) -> None:
+    h = register(client)
+    [p] = fetch(
+        client,
+        h,
+        start_agent(client, h, {"goal": "add a wireless mouse to my cart", "allow_proposals": True}).json()["id"],
+    )["proposals"]
+    assert "budget_max_inr" not in p["payload"] and "budget_min_inr" not in p["payload"]
+    _set_price(db, p["payload"]["product_id"], p["payload"]["expected_price_inr"] + 5_000)
+    r = client.post(f"/api/actions/{p['id']}/approve", headers=h)
+    assert r.status_code == 409 and r.json()["error"]["details"]["reason"] == "price_changed"
+
+
+# ------------------------------------------------------------------ the failure path (both databases)
+def test_a_failed_approval_records_failure_once_and_leaves_no_partial_cart(client: TestClient, db: Session) -> None:
+    h = register(client)
+    user_id = uid(client, h)
+    p = _proposal(client, h)
+    product = db.get(Product, p["payload"]["product_id"])
+    assert product is not None
+    product.stock = 0
+    db.commit()
+    r = client.post(f"/api/actions/{p['id']}/approve", headers=h)
+    assert r.status_code == 409 and r.json()["error"]["details"]["reason"] == "cart_rejected"
+    db.expire_all()
+    assert db.scalar(select(Cart).where(Cart.user_id == user_id)) is None  # the cart created mid-way was rolled back
+    row = db.get(AgentAction, p["id"])
+    assert row is not None and row.status == "failed" and row.result["reason"] == "cart_rejected"
+    product.stock = 50
+    db.commit()
+    again = client.post(f"/api/actions/{p['id']}/approve", headers=h)  # a failed action stays failed
+    assert again.status_code == 410 and again.json()["error"]["details"]["status"] == "failed"
+    assert cart_lines(client, h) == []
+
+
+# ------------------------------------------------------------------ action filters: ownership and status
+def test_action_filters_return_only_the_callers_actions_by_effective_status(client: TestClient, db: Session) -> None:
+    now = datetime.now(UTC)
+    owners = {}
+    for who in ("me", "other"):
+        h = register(client)
+        user_id = uid(client, h)
+        made = {}
+        for label, status, expires in (
+            ("live", "pending", now + timedelta(minutes=5)),
+            ("lapsed", "pending", now - timedelta(seconds=1)),  # expired, not yet visited
+            ("expired", "expired", now - timedelta(minutes=5)),
+            ("executed", "executed", now + timedelta(minutes=5)),
+            ("rejected", "rejected", now + timedelta(minutes=5)),
+        ):
+            a = AgentAction(
+                id=f"{who}-{label}",
+                user_id=user_id,
+                kind="add_to_cart",
+                payload={"product_id": 1, "quantity": 1, "expected_price_inr": 1},
+                summary=label,
+                status=status,
+                result={},
+                expires_at=expires,
+            )
+            db.add(a)
+            made[label] = a.id
+        owners[who] = (h, made)
+    db.commit()
+    h, mine = owners["me"]
+
+    def ids(**params: str) -> set[str]:
+        r = client.get("/api/actions", headers=h, params=params)
+        assert r.status_code == 200
+        return {a["id"] for a in r.json()}
+
+    assert ids(status="pending") == {mine["live"]}
+    assert ids(status="expired") == {mine["lapsed"], mine["expired"]}
+    assert ids(status="executed") == {mine["executed"]}
+    assert ids(status="rejected") == {mine["rejected"]}
+    assert ids() == set(mine.values())  # never another user's
+    shown = {a["id"]: a["status"] for a in client.get("/api/actions", headers=h).json()}
+    assert shown[mine["lapsed"]] == "expired" and shown[mine["live"]] == "pending"
+    assert client.get("/api/actions", headers=h, params={"status": "bogus"}).status_code == 422
+    assert client.get("/api/actions", params={"status": "pending"}).status_code == 401
+    _, theirs = owners["other"]
+    for op in ("approve", "reject"):  # and another user's action can't be decided
+        assert client.post(f"/api/actions/{theirs['live']}/{op}", headers=h).status_code == 404
+    assert db.get(AgentAction, theirs["live"]).status == "pending"  # type: ignore[union-attr]

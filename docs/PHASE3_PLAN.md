@@ -83,8 +83,10 @@ goal ─► RequestParser + validate_intent (deterministic intent and hard const
   * **Chat replacements.** Superseding older chat proposals is now one conditional `UPDATE … WHERE status = 'pending'`. Previously it selected, then updated, which could overwrite an action that had just been executed.
   * **`_fail` re-locks the action** after its rollback.
   * **Expired actions** are reported as `expired` before anyone acts on them.
-  * **Cart creation race.** Two simultaneous first cart writes for the same user no longer fail on the unique `carts.user_id` (fixed with a savepoint).
+  * **Cart creation race.** Two simultaneous first cart writes for the same user no longer fail on the unique `carts.user_id`. The fix uses `INSERT … ON CONFLICT (user_id) DO NOTHING` inside the caller's transaction. An earlier savepoint version left a partial cart behind on SQLite after a failed approval, because SQLite's driver commits a savepoint on release; a test now covers that.
   * **New PostgreSQL tests** cover the chat-replacement race, the first-cart race, and a mixed-load run (approvals, rejections, chat proposals and direct adds, checking for deadlocks and lost cart changes; 10 out of 10 runs clean).
+  * **Direct failure-path test (PostgreSQL).** A failing approval is paused right after its rollback (lock released) while another approval executes the action. The failing request re-locks, keeps `executed`, and the cart changes once. Afterwards the row can be locked with `NOWAIT`, so no lock lingers. Removing the re-lock makes this test fail (`'failed' == 'executed'`).
+  * **Action filters:** `pending` and `expired` are by effective status and always scoped to the caller. A test covers two users and all status filters, plus 422 and 401.
   * **Lock order** is unchanged: action, then product, then cart rows. Checkout locks products in sorted order, then cart rows. Nothing locks an action after a product, so there is no deadlock cycle.
 * **Proposals are idempotent per step.** The tool returns the step's existing proposal. The database's unique step link backs this up, and the proposal is committed together with the step's success.
 * **The registry write guard** lets a propose tool create new pending `AgentAction` rows only. Anything else is rolled back as `write_attempted`.

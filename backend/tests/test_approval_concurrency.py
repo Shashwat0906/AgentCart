@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import get_settings
 from app.core.errors import ConflictError
-from app.models import AgentAction, CartItem, Conversation, Product
+from app.models import AgentAction, Cart, CartItem, Conversation, Product
 from app.services import actions as action_service
 from app.services import cart as cart_service
 from tests.conftest import IS_SQLITE, register
@@ -270,3 +270,87 @@ def test_concurrent_first_cart_writes_share_one_cart(client: TestClient, Session
     b.join(10)
     assert "error" not in result, result.get("error")
     assert result["first"] == result["second"]
+
+
+def test_a_failing_approval_relocks_and_never_overwrites_a_concurrent_decision(
+    client: TestClient, SessionLocal: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The failure path rolls back (dropping partial cart changes, and with them the action's row lock) before
+    recording "failed". If another approval executes the action in that gap, the failing request must re-lock,
+    see "executed" and keep it: the cart changes once, and the action says so."""
+    user_id = uid(client, register(client))
+    action_id, product_id = _pending_add(SessionLocal, user_id)
+    in_gap, release = threading.Event(), threading.Event()
+    real_add, real_rollback = cart_service.add_item, Session.rollback
+    armed = threading.local()
+
+    def failing_add(*args: Any, **kwargs: Any) -> Any:
+        if threading.current_thread().name == "failing":
+            armed.on = True  # the next rollback is the failure path's
+            raise ConflictError("Only 0 unit(s) available", details={"available": 0})
+        return real_add(*args, **kwargs)
+
+    def rollback_then_pause(self: Session) -> None:
+        real_rollback(self)
+        if getattr(armed, "on", False):
+            armed.on = False
+            in_gap.set()  # lock released, failure not yet recorded …
+            release.wait(10)  # … while another approval goes through
+
+    monkeypatch.setattr(cart_service, "add_item", failing_add)
+    monkeypatch.setattr(Session, "rollback", rollback_then_pause)
+    outcome: dict[str, str] = {}
+
+    def decide(name: str) -> None:
+        with SessionLocal() as s:
+            try:
+                action_service.approve(s, user_id, action_id, get_settings())
+                outcome[name] = "executed"
+            except ConflictError as exc:
+                outcome[name] = f"conflict:{exc.details.get('reason')}"
+            except action_service.ActionGone as exc:
+                outcome[name] = f"gone:{exc.details.get('status')}"
+
+    failing = threading.Thread(target=decide, args=("failing",), name="failing")
+    failing.start()
+    assert in_gap.wait(10)
+    other = threading.Thread(target=decide, args=("other",), name="other")
+    other.start()
+    other.join(10)  # not blocked: the failing request's rollback released the row lock
+    assert outcome.get("other") == "executed"
+    release.set()
+    failing.join(10)
+
+    assert outcome["failing"] == "conflict:cart_rejected"  # its own attempt still reports the problem
+    with SessionLocal() as s:
+        action = s.get(AgentAction, action_id)
+        assert action is not None and action.status == "executed" and "reason" not in action.result
+        item = s.scalar(select(CartItem).where(CartItem.product_id == product_id))
+        assert item is not None and item.quantity == 1  # exactly one cart mutation
+        # lock cleanup: nobody still holds the action's row lock
+        s.execute(select(AgentAction).where(AgentAction.id == action_id).with_for_update(nowait=True)).one()
+        s.rollback()
+
+
+def test_a_failed_approval_releases_the_lock_and_leaves_no_partial_cart(
+    client: TestClient, SessionLocal: sessionmaker[Session]
+) -> None:
+    user_id = uid(client, register(client))
+    action_id, product_id = _pending_add(SessionLocal, user_id)
+    with SessionLocal() as s:
+        product = s.get(Product, product_id)
+        assert product is not None
+        product.stock = 0
+        s.commit()
+    with SessionLocal() as s:  # the approving session stays open afterwards
+        with pytest.raises(ConflictError):
+            action_service.approve(s, user_id, action_id, get_settings())
+        with SessionLocal() as other:  # its lock is gone: another session can lock the row without waiting
+            other.execute(select(AgentAction).where(AgentAction.id == action_id).with_for_update(nowait=True)).one()
+            other.rollback()
+    with SessionLocal() as s:
+        action = s.get(AgentAction, action_id)
+        assert action is not None and action.status == "failed" and action.result["reason"] == "cart_rejected"
+        assert s.scalar(select(Cart).where(Cart.user_id == user_id)) is None  # the cart created mid-way was rolled back
+        with pytest.raises(action_service.ActionGone):  # and it can't be retried into the cart
+            action_service.approve(s, user_id, action_id, get_settings())
