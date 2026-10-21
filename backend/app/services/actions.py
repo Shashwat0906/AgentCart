@@ -71,6 +71,17 @@ def get_owned(db: Session, user_id: int, action_id: str) -> AgentAction:
     return action
 
 
+def _lock_owned(db: Session, user_id: int, action_id: str) -> AgentAction:
+    """The caller's action, row-locked until this transaction ends. Deciding an action reads its status under
+    this lock, so concurrent approve/reject requests (double click, retry, two tabs) are serialised: the first
+    one decides, the others see the new status and change nothing."""
+    action = db.get(AgentAction, action_id, with_for_update=True, populate_existing=True)
+    if action is None or action.user_id != user_id:
+        db.rollback()  # release the lock; don't reveal other users' actions
+        raise NotFoundError("Action not found")
+    return action
+
+
 def list_actions(db: Session, user_id: int, status: str | None = None) -> list[AgentAction]:
     stmt = select(AgentAction).where(AgentAction.user_id == user_id).order_by(AgentAction.created_at.desc())
     if status:
@@ -88,7 +99,7 @@ def _ensure_pending(db: Session, action: AgentAction) -> None:
 
 
 def reject(db: Session, user_id: int, action_id: str) -> AgentAction:
-    action = get_owned(db, user_id, action_id)
+    action = _lock_owned(db, user_id, action_id)
     _ensure_pending(db, action)
     action.status = "rejected"
     action.decided_at = _now()
@@ -97,7 +108,7 @@ def reject(db: Session, user_id: int, action_id: str) -> AgentAction:
 
 
 def approve(db: Session, user_id: int, action_id: str, settings: Settings) -> AgentAction:
-    action = get_owned(db, user_id, action_id)
+    action = _lock_owned(db, user_id, action_id)
     _ensure_pending(db, action)
     if action.kind == "add_to_cart":
         _execute_add_to_cart(db, user_id, action, settings)
