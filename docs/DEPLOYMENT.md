@@ -117,10 +117,11 @@ products, so don't put personal data in requests. Check the project's limits on 
 3. **Save and deploy**: the provider is created at start-up, so a deploy (restart) is required.
 4. Verify: `/api/health/ready` shows `"llm_provider":"openai_compatible"` and the expected `"commit"`. Send a chat
    search. In the Render logs, `openai_compatible rejected the request: HTTP 401: invalid or missing API key` (or 403,
-   429) means the key or quota failed, `HTTP 400: invalid request` means a wrong model name or parameter, and `openai_compatible attempt N failed` means timeouts or outages; the chat
+   429) means the key or quota failed, `HTTP 400: invalid request` means a wrong parameter, `HTTP 404: model or endpoint not found` means the model name (or base URL) is wrong or not available to this key, and `openai_compatible attempt N failed` means timeouts or outages; the chat
    still answers using the rules.
 
 **Back to mock:** set `LLM_PROVIDER=mock` (or remove it) and deploy. A missing key also falls back to mock at start-up,
-and invalid requests (400), invalid keys (401/403), quota (429), timeouts and outages fall back to the rules per message;
-400/401/402/403/429 are not retried, so a bad parameter, a bad key or an exhausted quota doesn't spend more requests.
+and invalid requests (400), invalid keys (401/403), unknown models (404), quota (429), timeouts and outages fall back to
+the rules per message; 400/401/402/403/404/429 are not retried, so a bad parameter, key or model name, or an exhausted
+quota, doesn't spend more requests.
 Timeouts and server errors (5xx) are retried up to `LLM_MAX_RETRIES` times.

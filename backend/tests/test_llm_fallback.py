@@ -3,6 +3,7 @@ the rule-based parser and summary, tasks stay rule-based, and nothing switches p
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable, Iterator
 from typing import Any
@@ -76,12 +77,22 @@ def timeout(request: httpx.Request) -> httpx.Response:
         (lambda r: httpx.Response(400, json={"error": {"message": "Invalid value for reasoning_effort"}}), 2),
         (lambda r: httpx.Response(401, json={"error": {"message": "API key not valid"}}), 2),  # invalid key
         (lambda r: httpx.Response(403, json={}), 2),  # no access
+        (lambda r: httpx.Response(404, json={"error": {"status": "NOT_FOUND"}}), 2),  # unknown or inaccessible model
         (lambda r: httpx.Response(429, json={}), 2),  # free-tier quota or rate limit reached
         (lambda r: httpx.Response(503), 4),  # outage: retried within bounds
         (timeout, 4),  # slow provider: retried within bounds
         (lambda r: httpx.Response(200, json={"choices": [{"message": {"content": ""}}]}), 4),  # empty answer
     ],
-    ids=["bad-request-400", "invalid-key-401", "no-access-403", "quota-429", "outage-503", "timeout", "empty-answer"],
+    ids=[
+        "bad-request-400",
+        "invalid-key-401",
+        "no-access-403",
+        "model-not-found-404",
+        "quota-429",
+        "outage-503",
+        "timeout",
+        "empty-answer",
+    ],
 )
 def test_chat_falls_back_to_the_rules_when_the_hosted_llm_fails(
     client: TestClient, gemini: Any, handler: Callable[[httpx.Request], httpx.Response], max_calls: int
@@ -94,6 +105,42 @@ def test_chat_falls_back_to_the_rules_when_the_hosted_llm_fails(
     assert urls and all(u == GEMINI_URL + "/chat/completions" for u in urls)
     assert len(urls) <= max_calls  # at most two model calls per message, each within its retry budget
     assert FAKE_KEY not in str(body)
+    payload = body["assistant_message"]["payload"]
+    assert payload["llm_used"] is False and payload["provider"] == "openai_compatible"
+    assert "openai_compatible unavailable → rules only" in trace_detail(payload, "extract_constraints")
+
+
+def trace_detail(payload: dict[str, Any], node: str) -> str:
+    return next(str(t["detail"]) for t in payload["trace"] if t["node"] == node)
+
+
+def test_a_404_is_not_retried_and_the_trace_records_the_rules_fallback(
+    client: TestClient, gemini: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A wrong or inaccessible model name (e.g. one Google limits to earlier users) returns 404: one request per
+    model call, chat answers with the rule-based products, and the trace and log say what happened."""
+    # evaluation/run_eval.py calls logging.disable(WARNING) when test_evaluation runs it in-process; undo it here
+    previous = logging.root.manager.disable
+    logging.disable(logging.NOTSET)
+    try:
+        h = register(client)
+        baseline = recommended(chat(client, h))
+        urls = gemini(lambda r: httpx.Response(404, json={"error": {"status": "NOT_FOUND"}}))
+        body = chat(client, h)
+    finally:
+        logging.disable(previous)
+    payload = body["assistant_message"]["payload"]
+    assert recommended(body) == baseline and baseline  # rule-based results
+    assert len(urls) == 2  # two model calls (understand, polish), one request each: no retries
+    assert payload["llm_used"] is False and payload["provider"] == "openai_compatible"
+    assert (
+        trace_detail(payload, "extract_constraints")
+        == "rules, openai_compatible unavailable → rules only (ProviderRejected)"
+    )
+    assert trace_detail(payload, "explain_recommendations") == "llm_polish=provider_error"
+    logged = " ".join(r.getMessage() for r in caplog.records)
+    assert "rejected the request: openai_compatible HTTP 404: model or endpoint not found" in logged
+    assert FAKE_KEY not in logged and FAKE_KEY not in str(body)
 
 
 def test_a_working_hosted_llm_is_used_and_cannot_change_the_products(client: TestClient, gemini: Any) -> None:

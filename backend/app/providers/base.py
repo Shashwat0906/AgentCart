@@ -24,8 +24,9 @@ class ProviderError(RuntimeError):
 
 class ProviderRejected(ProviderError):
     """The provider refused the request: invalid request parameters (400), invalid key (401), no access or billing
-    required (402/403), or quota or rate limit reached (429). Retrying can't help and would only spend quota, so it is
-    raised at once. Timeouts and server errors (5xx) are still retried within LLM_MAX_RETRIES."""
+    required (402/403), model or endpoint not found (404), or quota or rate limit reached (429). Retrying can't help
+    and would only spend quota, so it is raised at once. Timeouts and server errors (5xx) are still retried within
+    LLM_MAX_RETRIES."""
 
 
 _REJECTED = {
@@ -33,6 +34,7 @@ _REJECTED = {
     401: "invalid or missing API key",
     402: "payment required",
     403: "access denied",
+    404: "model or endpoint not found (check HOSTED_LLM_MODEL and HOSTED_LLM_BASE_URL)",
     429: "rate limit or quota reached",
 }
 
