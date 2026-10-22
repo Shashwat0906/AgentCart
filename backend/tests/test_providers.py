@@ -208,6 +208,7 @@ def test_an_unknown_reasoning_effort_is_rejected() -> None:
         (401, "invalid or missing API key"),
         (402, "payment required"),
         (403, "access denied"),
+        (404, "model or endpoint not found (check HOSTED_LLM_MODEL and HOSTED_LLM_BASE_URL)"),
         (429, "rate limit or quota reached"),
     ],
 )
